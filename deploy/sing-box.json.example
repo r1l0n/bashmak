@@ -1,16 +1,13 @@
 {
-  "_комментарий": [
-    "Клиент sing-box: поднимает TUN-интерфейс и уводит его трафик в VLESS+Reality на VPS.",
-    "Скопировать в /etc/sing-box/config.json и заменить <...> значениями из 3x-ui.",
-    "auto_route=false принципиально: маршрут по умолчанию у системы не меняется,",
-    "в тоннель уходит только то, что промаркирует deploy/tunnel.sh.",
-    "Ключи из панели (uuid, public_key) — это учётные данные, в git их не коммитить:",
-    "конфиг лежит в /etc/sing-box/, а не в репозитории."
-  ],
-
-  "log": { "level": "warn", "timestamp": true },
+  "log": { "level": "info", "timestamp": true },
 
   "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-test",
+      "listen": "127.0.0.1",
+      "listen_port": 10808
+    },
     {
       "type": "tun",
       "tag": "tun-in",
@@ -27,21 +24,26 @@
     {
       "type": "vless",
       "tag": "vps",
-      "server": "<IP или домен VPS>",
-      "server_port": 443,
-      "uuid": "<UUID из 3x-ui>",
+      "server": "ADDRESS_FROM_LINK",
+      "server_port": 21023,
+      "uuid": "UUID_FROM_LINK",
       "flow": "xtls-rprx-vision",
       "packet_encoding": "xudp",
       "tls": {
         "enabled": true,
-        "server_name": "<SNI — поле Dest/SNI в настройках Reality>",
-        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "server_name": "max.ru",
+        "utls": { "enabled": true, "fingerprint": "qq" },
         "reality": {
           "enabled": true,
-          "public_key": "<Public Key из 3x-ui>",
-          "short_id": "<Short ID из 3x-ui>"
+          "public_key": "PBK_FROM_LINK",
+          "short_id": "202e"
         }
       }
     }
-  ]
+  ],
+
+  "route": {
+    "auto_detect_interface": true,
+    "final": "vps"
+  }
 }
