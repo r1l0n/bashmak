@@ -83,16 +83,16 @@ llm:
   temperature: 0.7
   top_p: 0.9
   request_timeout_s: 120
-  # Сколько реплик диалога держать в контексте (на канал).
-  history_turns: 12
+  # Истории нет: каждый вопрос уходит в модель отдельно, контекст не копится.
   # Реплика, пролежавшая в очереди дольше — уже неактуальна, выбрасываем.
   stale_task_s: 45
 
 tts:
-  voice_path: models/tts/ru_RU-irina-medium.onnx
+  # Мужской. Альтернативы: ru_RU-ruslan-medium, ru_RU-denis-medium.
+  voice_path: models/tts/ru_RU-dmitri-medium.onnx
   workers: 1
-  # >1 — медленнее речь, <1 — быстрее.
-  length_scale: 1.0
+  # >1 — медленнее речь, <1 — быстрее. Мужской голос звучит бодрее чуть быстрее.
+  length_scale: 0.95
   noise_scale: 0.667
   noise_w: 0.8
 

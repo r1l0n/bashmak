@@ -1,51 +1,21 @@
-"""История диалога: фон не вытесняет разговор, роли не идут сериями."""
+"""Промпт: системная часть плюс ровно одна реплика, без истории и фона."""
 
 from __future__ import annotations
 
-from bashmak.llm.persona import SYSTEM_PROMPT, Conversation
+from bashmak.llm.persona import SYSTEM_PROMPT, build_messages
 
 
-def test_ambient_lines_do_not_evict_dialogue():
-    """Трое болтающих не должны стирать вопрос и ответ бота."""
-    talk = Conversation(max_turns=4, ambient_lines=2)
-    talk.add_user("Вася", "как тебя зовут")
-    talk.add_assistant("Башмак")
+def test_prompt_is_system_plus_single_turn():
+    messages = build_messages("Вася", "как дела")
 
-    for index in range(20):
-        talk.note_ambient("Петя", f"фоновая реплика {index}")
-
-    messages = talk.build_messages("Вася", "а повтори")
-    joined = " ".join(message["content"] for message in messages)
-
-    assert "как тебя зовут" in joined
-    assert "Башмак" in joined
-    # Фона осталось ровно столько, сколько разрешено.
-    assert "фоновая реплика 18" in joined
-    assert "фоновая реплика 19" in joined
-    assert "фоновая реплика 17" not in joined
-
-
-def test_consecutive_user_turns_are_merged():
-    talk = Conversation(max_turns=8, ambient_lines=2)
-    talk.add_user("Вася", "первый вопрос")
-    talk.add_assistant("первый ответ")
-    talk.add_user("Вася", "второй вопрос")
-    talk.note_ambient("Петя", "что-то своё")
-
-    messages = talk.build_messages("Вася", "третий вопрос")
-    roles = [message["role"] for message in messages]
-
+    assert [m["role"] for m in messages] == ["system", "user"]
     assert messages[0]["content"] == SYSTEM_PROMPT
-    assert roles == ["system", "user", "assistant", "user"]
-    assert "третий вопрос" in messages[-1]["content"]
-    assert "что-то своё" in messages[-1]["content"]
+    assert messages[1]["content"] == "Вася: как дела"
 
 
-def test_ambient_is_consumed_by_a_real_turn():
-    talk = Conversation(max_turns=8, ambient_lines=4)
-    talk.note_ambient("Петя", "мимо бота")
-    talk.add_user("Вася", "вопрос")
-    talk.add_assistant("ответ")
+def test_nothing_carries_over_between_questions():
+    """Контекст сбрасывается: прошлый вопрос не должен просачиваться в новый."""
+    build_messages("Вася", "первый вопрос")
+    joined = " ".join(m["content"] for m in build_messages("Петя", "второй вопрос"))
 
-    joined = " ".join(m["content"] for m in talk.build_messages("Вася", "ещё"))
-    assert "мимо бота" not in joined, "фон уже уехал в промпт, второй раз не нужен"
+    assert "первый вопрос" not in joined

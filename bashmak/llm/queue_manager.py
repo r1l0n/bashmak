@@ -8,6 +8,9 @@
 первым и отвечаем, даже если его STT отработал дольше соседского. Реплики,
 пролежавшие дольше ``stale_task_s``, выбрасываются — отвечать через минуту
 на «что там по погоде» уже незачем.
+
+Истории между запросами нет: каждая реплика уходит в модель одна (см.
+persona.py). Хранить тут нечего, поэтому очередь без состояния.
 """
 
 from __future__ import annotations
@@ -15,19 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from ..utils.logging import current_cid, guard, stage
 from .client import LlmClient
-from .persona import Conversation
+from .persona import build_messages
 
 log = logging.getLogger(__name__)
-
-#: Сколько каналов держать в памяти. История чистится при выходе из канала,
-#: но лимит страхует от утечки, если сессия закрылась не по-хорошему.
-MAX_CONVERSATIONS = 32
 
 
 @dataclass(order=True)
@@ -52,10 +50,8 @@ class LlmQueue:
         self._client = client
         self._on_reply = on_reply
         self._stale_after = float(cfg.get("stale_task_s", 45))
-        self._history_turns = int(cfg.get("history_turns", 12))
 
         self._queue: asyncio.PriorityQueue[ChatTask] = asyncio.PriorityQueue()
-        self._conversations: OrderedDict[int, Conversation] = OrderedDict()
         self._task: asyncio.Task | None = None
         self._deliveries: set[asyncio.Task] = set()
 
@@ -87,28 +83,6 @@ class LlmQueue:
         await self._queue.put(task)
         log.debug("в очередь LLM: %r (глубина %d)", task.text, self._queue.qsize())
 
-    def conversation(self, channel_id: int) -> Conversation:
-        conversation = self._conversations.get(channel_id)
-        if conversation is None:
-            conversation = Conversation(self._history_turns)
-            self._conversations[channel_id] = conversation
-            while len(self._conversations) > MAX_CONVERSATIONS:
-                dropped, _ = self._conversations.popitem(last=False)
-                log.debug("история канала %s вытеснена по лимиту", dropped)
-        self._conversations.move_to_end(channel_id)
-        return conversation
-
-    def note_user_line(self, channel_id: int, speaker: str, text: str) -> None:
-        """Запомнить реплику без обращения к боту — как фон разговора.
-
-        Именно фон, а не полноценный ход диалога: иначе трое болтающих людей
-        за пару секунд вытеснили бы из окна истории и вопрос, и свой же ответ.
-        """
-        self.conversation(channel_id).note_ambient(speaker, text)
-
-    def reset(self, channel_id: int) -> None:
-        self._conversations.pop(channel_id, None)
-
     @property
     def depth(self) -> int:
         return self._queue.qsize()
@@ -131,19 +105,14 @@ class LlmQueue:
                 self._queue.task_done()
 
     async def _handle(self, task: ChatTask) -> None:
-        conversation = self.conversation(task.channel_id)
-        messages = conversation.build_messages(task.speaker, task.text)
-
         with stage(log, "llm", queue=self._queue.qsize()) as info:
-            reply = await self._client.complete(messages)
+            reply = await self._client.complete(build_messages(task.speaker, task.text))
             info["chars"] = len(reply)
 
         if not reply:
             log.warning("LLM вернула пустой ответ на %r", task.text)
             return
 
-        conversation.add_user(task.speaker, task.text)
-        conversation.add_assistant(reply)
         log.info("ответ: %r", reply)
 
         # Озвучка идёт отдельным таском: ждать её здесь значило бы держать

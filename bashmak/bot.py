@@ -83,7 +83,6 @@ class GuildSession:
         with contextlib.suppress(Exception):
             await self.voice_client.disconnect(force=True)
 
-        self.bot.llm_queue.reset(self.channel_id)
         log.info("сессия в %s закрыта", self.guild.name)
 
     def _on_listen_stop(self, error=None, *args) -> None:  # noqa: ANN001 — сигнатура библиотеки
@@ -120,8 +119,6 @@ class GuildSession:
         match = self.bot.wakeword.match(transcript.text)
 
         if match is None:
-            # Реплика не боту: запоминаем как фон, не как ход диалога.
-            self.bot.llm_queue.note_user_line(self.channel_id, speaker, transcript.text)
             log.debug("%s (мимо): %s", speaker, transcript.text)
             return
 
@@ -420,15 +417,6 @@ def build_bot(cfg: Config) -> BashmakBot:
             if session.player.queued:
                 lines.append(f"в очереди треков: {len(session.player.queued)}")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
-    @bot.tree.command(name="forget", description="Забыть историю разговора")
-    async def forget(interaction: discord.Interaction) -> None:
-        if await _reject_dm(interaction):
-            return
-        session = bot.sessions.get(interaction.guild.id)
-        if session is not None:
-            bot.llm_queue.reset(session.channel_id)
-        await interaction.response.send_message("Забыл, о чём говорили.", ephemeral=True)
 
     return bot
 

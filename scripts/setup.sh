@@ -82,7 +82,9 @@ case "$PROFILE" in
 esac
 
 STT_DIR="models/stt/$(basename "$STT_REPO")"
-TTS_VOICE="ru_RU-irina-medium"
+# Мужской голос. Из четырёх русских у Piper (denis, dmitri, irina, ruslan)
+# dmitri самый чистый; все они medium — «high» для русского не выпускали.
+TTS_VOICE="ru_RU-dmitri-medium"
 VAD_URL="https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
 VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
