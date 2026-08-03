@@ -1,0 +1,30 @@
+[Unit]
+Description=Bashmak — голосовой бот для Discord
+# Бот без LLM бесполезен: поднимаем сервер первым и падаем вместе с ним.
+Requires=llama-server.service
+After=llama-server.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@@USER@@
+WorkingDirectory=@@ROOT@@
+EnvironmentFile=@@ROOT@@/.env
+ExecStart=@@ROOT@@/.venv/bin/python -m bashmak.bot
+Restart=always
+RestartSec=10
+KillSignal=SIGINT
+# Дать время дренировать очереди и закрыть пулы процессов.
+TimeoutStopSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bashmak
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@@ROOT@@
+
+[Install]
+WantedBy=multi-user.target

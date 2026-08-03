@@ -1,0 +1,20 @@
+# окружение
+.venv/
+vendor/
+.env
+
+# веса моделей — качаются scripts/setup.sh
+models/
+
+# рантайм
+logs/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# локальный конфиг (шаблон — config.example.yaml)
+config.yaml

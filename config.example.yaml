@@ -1,0 +1,111 @@
+# Конфиг «Башмака». setup.sh копирует этот файл в config.yaml, если его ещё нет,
+# и подставляет пути моделей согласно выбранному профилю (--profile).
+# Все относительные пути считаются от корня проекта.
+
+# Профиль железа, проставляется setup.sh: fast | balanced | quality
+profile: balanced
+
+discord:
+  # Пусто = глобальные slash-команды (регистрируются до часа).
+  # Укажите ID своих серверов, чтобы команды появились мгновенно.
+  guild_ids: []
+  # Выйти из голосового канала, если он пуст столько секунд (0 = не выходить).
+  idle_leave_seconds: 900
+
+audio:
+  # Формат, в котором py-cord отдаёт декодированный PCM. Менять нельзя.
+  discord_sample_rate: 48000
+  discord_channels: 2
+  # Формат, в котором работают VAD и Whisper.
+  work_sample_rate: 16000
+  # Длительность кадра Discord, мс. 20 мс = 3840 байт. Менять нельзя.
+  frame_ms: 20
+
+vad:
+  # Порог вероятности речи (0..1). Выше — меньше ложных срабатываний, но режет тихую речь.
+  threshold: 0.5
+  # Сколько тишины считать концом фразы.
+  silence_ms: 700
+  # Короче этого — мусор (кашель, стук по столу), выбрасываем.
+  min_speech_ms: 300
+  # Принудительно нарезать монолог, чтобы не копить бесконечный сегмент.
+  max_segment_s: 20
+  # Сколько аудио «до» срабатывания VAD дописать в начало сегмента,
+  # чтобы не срезать первый слог.
+  preroll_ms: 300
+  # Размер окна Silero v5 для 16 кГц. Модель принимает только 512.
+  window_samples: 512
+  # Путь к весам VAD (качает setup.sh).
+  model_path: models/vad/silero_vad.onnx
+
+stt:
+  model_path: models/stt/faster-whisper-small
+  compute_type: int8
+  language: ru
+  # Число процессов-воркеров. STT — CPU-bound, обходим GIL процессами.
+  workers: 2
+  cpu_threads_per_worker: 2
+  # beam_size 1 = greedy, заметно быстрее на CPU при небольшой потере качества.
+  beam_size: 1
+  # Сегменты с низкой уверенностью выбрасываем (обычно это шум).
+  min_avg_logprob: -1.0
+  no_speech_threshold: 0.6
+  # Подсказка Whisper: сильно повышает шанс, что имя бота распознается
+  # как «Башмак», а не «башмаг»/«бошняк».
+  initial_prompt: "Разговор с ботом по имени Башмак."
+
+wakeword:
+  variants:
+    - башмак
+    - бошмак
+    - башмачок
+    - бащмак
+    - башмачек
+  # Порог rapidfuzz partial_ratio, 0..100.
+  threshold: 80
+  # true = в LLM уходит только текст после имени, false = вся фраза.
+  strip_prefix: true
+
+intent:
+  # Когда звать LLM для разбора намерения, если регекс не сработал:
+  #   hinted — только если в реплике есть музыкальный намёк (по умолчанию);
+  #   always — всегда (точнее, но +1 инференс к каждой реплике);
+  #   never  — никогда, только регекс.
+  llm_fallback: hinted
+
+llm:
+  server_url: http://127.0.0.1:8080
+  model_path: models/llm/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+  # Потоки llama-server. 6 физических ядер: 4 сюда, 2 остаются STT/TTS.
+  threads: 4
+  context_size: 4096
+  max_tokens: 200
+  temperature: 0.7
+  top_p: 0.9
+  request_timeout_s: 120
+  # Сколько реплик диалога держать в контексте (на канал).
+  history_turns: 12
+  # Реплика, пролежавшая в очереди дольше — уже неактуальна, выбрасываем.
+  stale_task_s: 45
+
+tts:
+  voice_path: models/tts/ru_RU-irina-medium.onnx
+  workers: 1
+  # >1 — медленнее речь, <1 — быстрее.
+  length_scale: 1.0
+  noise_scale: 0.667
+  noise_w: 0.8
+
+music:
+  volume: 0.5
+  # До какой громкости приглушать музыку, пока говорит бот.
+  duck_volume: 0.25
+  duck_fade_ms: 150
+  max_queue: 20
+  search_timeout_s: 20
+
+logging:
+  level: INFO
+  file: logs/bashmak.log
+  max_bytes: 10485760
+  backup_count: 5

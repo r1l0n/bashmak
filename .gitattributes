@@ -1,0 +1,7 @@
+# Скрипты запускаются на Ubuntu — всегда LF, даже если правились в Windows.
+*.sh          text eol=lf
+*.template    text eol=lf
+*.gbnf        text eol=lf
+*.py          text eol=lf
+*.yaml        text eol=lf
+*.md          text eol=lf

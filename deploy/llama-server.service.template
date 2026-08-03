@@ -1,0 +1,28 @@
+[Unit]
+Description=Bashmak — llama.cpp server (LLM backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@@USER@@
+WorkingDirectory=@@ROOT@@
+ExecStart=@@ROOT@@/scripts/run_llama_server.sh
+Restart=always
+RestartSec=5
+# Модель грузится в память минуты — не убивать раньше времени.
+TimeoutStartSec=300
+KillSignal=SIGINT
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llama-server
+
+# Слушает только 127.0.0.1, наружу ничего не торчит.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=@@ROOT@@
+
+[Install]
+WantedBy=multi-user.target
