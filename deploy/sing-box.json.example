@@ -20,7 +20,18 @@
     }
   ],
 
+  "dns": {
+    "servers": [
+      { "tag": "remote", "address": "1.1.1.1", "detour": "vps" },
+      { "tag": "local", "address": "local", "detour": "direct" }
+    ],
+    "rules": [{ "outbound": "any", "server": "local" }],
+    "final": "remote",
+    "strategy": "ipv4_only"
+  },
+
   "outbounds": [
+    { "type": "direct", "tag": "direct" },
     {
       "type": "vless",
       "tag": "vps",
