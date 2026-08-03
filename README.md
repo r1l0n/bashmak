@@ -84,6 +84,70 @@ journalctl -u bashmak -f
 
 ---
 
+## Если Discord заблокирован по IP
+
+Проверить, есть ли проблема:
+
+```bash
+curl -sS -o /dev/null -w 'connect=%{time_connect} tls=%{time_appconnect} code=%{http_code}\n' --max-time 10 https://discord.com/api/v10/gateway
+```
+
+`connect=0` означает, что SYN дропается и до TLS дело не доходит. Обход на
+уровне DPI (zapret и подобные) тут бесполезен: он ломает разбор TLS
+ClientHello внутри уже установленного соединения, а соединения нет. Нужен
+туннель.
+
+Заворачивать весь сервер не надо — `llama-server` слушает `127.0.0.1`,
+а STT/TTS/VAD сети не касаются вообще. Наружу должен ходить только бот:
+веб-сокет шлюза и голосовой UDP, суммарно меньше сотни килобит.
+
+**Почему именно TUN, а не SOCKS.** py-cord умеет проксировать REST и шлюз,
+но голос открывает UDP-сокет напрямую, мимо настроек прокси. С прокси бот
+зайдёт в канал и будет молчать в обе стороны. Нужен виртуальный интерфейс,
+через который уходит весь трафик процесса, включая UDP.
+
+Порядок:
+
+1. На VPS в панели (3x-ui и аналоги) завести inbound **VLESS + TCP +
+   REALITY**, flow `xtls-rprx-vision`. Именно TCP+Vision: XHTTP и прочие
+   маскирующиеся транспорты добавляют джиттер, а голос чувствителен к
+   разбросу задержки сильнее, чем к её величине.
+2. На сервере поставить sing-box и положить конфиг:
+
+```bash
+sudo cp deploy/sing-box.json.example /etc/sing-box/config.json && sudo nano /etc/sing-box/config.json
+```
+
+3. Поднять тоннель и убедиться, что интерфейс появился:
+
+```bash
+sudo systemctl enable --now sing-box && ip -brief addr show tun-bashmak
+```
+
+4. В `/etc/systemd/system/bashmak.service` раскомментировать четыре строки
+   про `sing-box.service` и `deploy/tunnel.sh`, затем:
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart bashmak
+```
+
+[deploy/tunnel.sh](deploy/tunnel.sh) маркирует трафик по cgroup юнита —
+не по пользователю. Поэтому не нужно заводить отдельного пользователя и
+переразбивать права на каталог проекта: правило бьёт ровно в один сервис,
+а ssh и apt остаются на прямом маршруте. Локальные адреса и DNS из тоннеля
+исключены — иначе бот потерял бы собственный `llama-server` на `127.0.0.1`.
+
+Проверить, что получилось:
+
+```bash
+sudo ./deploy/tunnel.sh status
+```
+
+После этого `./scripts/doctor.sh` должен показать `DISCORD_TOKEN` зелёным —
+именно эта проверка первой упирается в блокировку.
+
+---
+
 ## Как этим пользоваться
 
 В Discord: зайдите в голосовой канал и вызовите `/join`. Дальше просто

@@ -4,12 +4,21 @@ Description=Bashmak — голосовой бот для Discord
 Requires=llama-server.service
 After=llama-server.service network-online.target
 Wants=network-online.target
+# Раскомментировать, если Discord доступен только через туннель
+# (см. deploy/tunnel.sh и раздел README про блокировку по IP).
+#Requires=sing-box.service
+#After=sing-box.service
 
 [Service]
 Type=simple
 User=@@USER@@
 WorkingDirectory=@@ROOT@@
 EnvironmentFile=@@ROOT@@/.env
+# «+» — команда выполняется от root и вне песочницы юнита; iptables иначе не сможет.
+# Ставится именно в ExecStartPre, а не отдельным сервисом: cgroup юнита к этому
+# моменту уже создан, и правилу есть за что зацепиться.
+#ExecStartPre=+@@ROOT@@/deploy/tunnel.sh up
+#ExecStopPost=+@@ROOT@@/deploy/tunnel.sh down
 ExecStart=@@ROOT@@/.venv/bin/python -m bashmak.bot
 Restart=always
 RestartSec=10

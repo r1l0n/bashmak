@@ -112,7 +112,7 @@ check_host() {
 
     # Если репозиторий пушили с Windows, бит исполняемости в индексе не
     # сохранился и systemd не смог бы запустить run_llama_server.sh.
-    if chmod +x "$ROOT"/scripts/*.sh 2>/dev/null; then
+    if chmod +x "$ROOT"/scripts/*.sh "$ROOT"/deploy/*.sh 2>/dev/null; then
         ok "скрипты помечены исполняемыми"
     fi
 
@@ -444,8 +444,35 @@ setup_systemd() {
     $SUDO systemctl daemon-reload
     $SUDO systemctl enable llama-server.service bashmak.service >/dev/null
     ok "юниты включены (автозапуск при загрузке)"
-    ok "старт:  sudo systemctl start bashmak"
-    ok "логи:   journalctl -u bashmak -f"
+
+    # enable — это только автозапуск при загрузке. Без явного start сервис
+    # так и останется в состоянии «inactive (dead)», а doctor.sh покажет,
+    # что llama-server не отвечает.
+    $SUDO systemctl restart llama-server.service
+    ok "llama-server запущен, жду загрузки модели в память"
+
+    local waited=0
+    while [ "$waited" -lt 300 ]; do
+        if curl -fsS --max-time 2 "http://127.0.0.1:8080/health" >/dev/null 2>&1; then
+            ok "llama-server отвечает (${waited} с)"
+            break
+        fi
+        if ! $SUDO systemctl is-active --quiet llama-server.service; then
+            warn "llama-server упал — смотрите: journalctl -u llama-server -n 50"
+            break
+        fi
+        sleep 3
+        waited=$((waited + 3))
+    done
+    [ "$waited" -lt 300 ] || warn "llama-server не поднялся за 5 минут"
+
+    if grep -qE '^DISCORD_TOKEN=.+' "$ROOT/.env" 2>/dev/null; then
+        $SUDO systemctl restart bashmak.service
+        ok "бот запущен: journalctl -u bashmak -f"
+    else
+        warn "бот не запущен: сначала впишите DISCORD_TOKEN в .env, потом"
+        warn "  sudo systemctl start bashmak"
+    fi
 }
 
 # ---------------------------------------------------------- 8. итог ----

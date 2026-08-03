@@ -1,0 +1,47 @@
+{
+  "_комментарий": [
+    "Клиент sing-box: поднимает TUN-интерфейс и уводит его трафик в VLESS+Reality на VPS.",
+    "Скопировать в /etc/sing-box/config.json и заменить <...> значениями из 3x-ui.",
+    "auto_route=false принципиально: маршрут по умолчанию у системы не меняется,",
+    "в тоннель уходит только то, что промаркирует deploy/tunnel.sh.",
+    "Ключи из панели (uuid, public_key) — это учётные данные, в git их не коммитить:",
+    "конфиг лежит в /etc/sing-box/, а не в репозитории."
+  ],
+
+  "log": { "level": "warn", "timestamp": true },
+
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "tun-bashmak",
+      "address": ["172.19.0.1/30"],
+      "mtu": 1400,
+      "auto_route": false,
+      "strict_route": false,
+      "stack": "system"
+    }
+  ],
+
+  "outbounds": [
+    {
+      "type": "vless",
+      "tag": "vps",
+      "server": "<IP или домен VPS>",
+      "server_port": 443,
+      "uuid": "<UUID из 3x-ui>",
+      "flow": "xtls-rprx-vision",
+      "packet_encoding": "xudp",
+      "tls": {
+        "enabled": true,
+        "server_name": "<SNI — поле Dest/SNI в настройках Reality>",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": {
+          "enabled": true,
+          "public_key": "<Public Key из 3x-ui>",
+          "short_id": "<Short ID из 3x-ui>"
+        }
+      }
+    }
+  ]
+}
