@@ -13,7 +13,7 @@ discord:
   idle_leave_seconds: 900
 
 audio:
-  # Формат, в котором py-cord отдаёт декодированный PCM. Менять нельзя.
+  # Формат, в котором Discord отдаёт декодированный PCM. Менять нельзя.
   discord_sample_rate: 48000
   discord_channels: 2
   # Формат, в котором работают VAD и Whisper.

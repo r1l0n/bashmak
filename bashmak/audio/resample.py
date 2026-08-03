@@ -51,7 +51,7 @@ class StreamResampler:
 
 
 def discord_pcm_to_mono(data: bytes) -> np.ndarray:
-    """48 кГц stereo s16le (как отдаёт py-cord) → 48 кГц моно float32 в [-1, 1]."""
+    """48 кГц stereo s16le (как отдаёт декодер Opus) → 48 кГц моно float32 в [-1, 1]."""
     pcm = np.frombuffer(data, dtype="<i2")
     # Обрезанный кадр (нечётное число сэмплов) не должен ронять поток.
     usable = (pcm.size // DISCORD_CHANNELS) * DISCORD_CHANNELS

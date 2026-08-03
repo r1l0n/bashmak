@@ -101,7 +101,7 @@ ClientHello внутри уже установленного соединени�
 а STT/TTS/VAD сети не касаются вообще. Наружу должен ходить только бот:
 веб-сокет шлюза и голосовой UDP, суммарно меньше сотни килобит.
 
-**Почему именно TUN, а не SOCKS.** py-cord умеет проксировать REST и шлюз,
+**Почему именно TUN, а не SOCKS.** discord.py умеет проксировать REST и шлюз,
 но голос открывает UDP-сокет напрямую, мимо настроек прокси. С прокси бот
 зайдёт в канал и будет молчать в обе стороны. Нужен виртуальный интерфейс,
 через который уходит весь трафик процесса, включая UDP.
@@ -227,8 +227,9 @@ Discord voice (по SSRC, раздельно на каждого)
 
 | Модуль | Что делает |
 |---|---|
-| [audio/sink.py](bashmak/audio/sink.py) | Приём PCM из py-cord, разводка по говорящим |
-| [audio/buffer.py](bashmak/audio/buffer.py) | Потокобезопасные буферы, граница «поток py-cord ↔ asyncio» |
+| [audio/sink.py](bashmak/audio/sink.py) | Приём PCM из voice-recv, разводка по говорящим |
+| [audio/voice_recv_patch.py](bashmak/audio/voice_recv_patch.py) | Расшифровка DAVE и живучесть приёма поверх библиотеки |
+| [audio/buffer.py](bashmak/audio/buffer.py) | Потокобезопасные буферы, граница «поток приёма ↔ asyncio» |
 | [audio/vad.py](bashmak/audio/vad.py) | Silero VAD в onnxruntime, нарезка на фразы |
 | [audio/listener.py](bashmak/audio/listener.py) | Опрос буферов, склейка VAD → STT |
 | [stt/whisper_worker.py](bashmak/stt/whisper_worker.py) | faster-whisper в пуле процессов |

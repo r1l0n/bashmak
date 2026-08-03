@@ -156,7 +156,7 @@ install_apt() {
     fi
 
     # ffmpeg и libopus — не «желательно», а обязательно:
-    # без ffmpeg не будет музыки, без opus py-cord не сможет ни принять, ни отдать голос.
+    # без ffmpeg не будет музыки, без opus бот не сможет ни принять, ни отдать голос.
     command -v ffmpeg >/dev/null || die "ffmpeg не найден после установки"
     ok "ffmpeg: $(ffmpeg -version 2>/dev/null | head -1 | cut -d' ' -f1-3)"
 }
@@ -213,6 +213,14 @@ setup_venv() {
     if [ "$FORCE" -eq 0 ] && [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$now" ]; then
         skip "зависимости не менялись"
     else
+        # py-cord и discord.py владеют одним пакетом `discord`: если оставить
+        # старую библиотеку в venv, файлы перемешаются и импорт сломается
+        # непредсказуемо. На чистой машине это ничего не делает.
+        if "$PY" -m pip show py-cord >/dev/null 2>&1; then
+            "$PY" -m pip uninstall -y py-cord >/dev/null
+            ok "снят py-cord (конфликтует с discord.py за пакет discord)"
+        fi
+
         ok "ставлю зависимости (это надолго — ctranslate2/onnxruntime тяжёлые)"
         "$PY" -m pip install --upgrade -r requirements.txt
         echo "$now" > "$stamp"

@@ -79,6 +79,10 @@ def _check_imports() -> str:
 
     modules = [
         "discord",
+        # Приём голоса и E2EE. Ловим здесь, а не при первом /start: если в
+        # venv остался py-cord, discord.ext.voice_recv не импортируется.
+        "discord.ext.voice_recv",
+        "davey",
         "faster_whisper",
         "onnxruntime",
         "soxr",

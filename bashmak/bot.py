@@ -1,4 +1,4 @@
-"""Точка входа: py-cord клиент и сборка всего пайплайна.
+"""Точка входа: discord.py клиент и сборка всего пайплайна.
 
 Что здесь важно понимать про распределение ресурсов:
 
@@ -20,8 +20,10 @@ import logging
 import time
 
 import discord
+from discord import app_commands
+from discord.ext import voice_recv
 
-from .audio import pycord_patch
+from .audio import voice_recv_patch
 from .audio.listener import VoiceListener
 from .config import Config, load_config
 from .intent.router import Decision, Intent, IntentRouter
@@ -43,7 +45,7 @@ IDLE_CHECK_INTERVAL = 30.0
 class GuildSession:
     """Всё, что живёт ровно столько, сколько бот сидит в голосовом канале."""
 
-    def __init__(self, bot: "BashmakBot", voice_client: discord.VoiceClient) -> None:
+    def __init__(self, bot: "BashmakBot", voice_client: voice_recv.VoiceRecvClient) -> None:
         self.bot = bot
         self.cfg = bot.cfg
         self.voice_client = voice_client
@@ -60,11 +62,9 @@ class GuildSession:
         # Один источник на всё время в канале: микшер сам разруливает,
         # что сейчас звучит — музыка, речь или их смесь.
         self.voice_client.play(self.arbiter.source)
-        # start_recording() в py-cord 2.8.1 больше не зовёт Sink.init(vc), а
-        # декодер пакетов начинается с assert sink.client и ищет автора кадра
-        # в vc._ssrc_to_id. Без этой строки приём падает на первом же пакете.
-        self.listener.sink.init(self.voice_client)
-        self.voice_client.start_recording(self.listener.sink, self._on_recording_stop)
+        # listen() сам проставляет синку voice_client (AudioReader.__init__),
+        # так что готовить его заранее не нужно.
+        self.voice_client.listen(self.listener.sink, after=self._on_listen_stop)
         self.listener.start()
         log.info(
             "сессия запущена в #%s (%s)",
@@ -78,9 +78,7 @@ class GuildSession:
         await self.listener.stop()
 
         with contextlib.suppress(Exception):
-            if self.voice_client.recording:
-                self.voice_client.stop_recording()
-        with contextlib.suppress(Exception):
+            # У VoiceRecvClient stop() снимает и приём, и воспроизведение.
             self.voice_client.stop()
         with contextlib.suppress(Exception):
             await self.voice_client.disconnect(force=True)
@@ -88,16 +86,16 @@ class GuildSession:
         self.bot.llm_queue.reset(self.channel_id)
         log.info("сессия в %s закрыта", self.guild.name)
 
-    def _on_recording_stop(self, error=None, *args) -> None:  # noqa: ANN001 — сигнатура py-cord
-        """Колбэк ``after`` для start_recording.
+    def _on_listen_stop(self, error=None, *args) -> None:  # noqa: ANN001 — сигнатура библиотеки
+        """Колбэк ``after`` для listen().
 
-        Синхронный намеренно: в 2.8.1 ``AudioReader._stop()`` зовёт его прямо
-        из своего потока (``self.after(self.error)``), не через луп. Корутина
+        Синхронный намеренно: ``AudioReader._stop()`` зовёт его прямо из
+        своего потока (``self.after(self.error)``), не через луп. Корутина
         здесь просто не была бы выполнена — «coroutine was never awaited».
         Первым аргументом приходит исключение, уронившее приём, или None.
         """
         if error is None:
-            log.debug("запись остановлена")
+            log.debug("приём голоса остановлен")
         else:
             log.error("приём голоса остановлен с ошибкой: %r", error)
 
@@ -177,7 +175,7 @@ class GuildSession:
         await self.say(answer)
 
 
-class BashmakBot(discord.Bot):
+class BashmakBot(discord.Client):
     def __init__(self, cfg: Config) -> None:
         intents = discord.Intents.default()
         intents.voice_states = True
@@ -187,6 +185,7 @@ class BashmakBot(discord.Bot):
 
         super().__init__(intents=intents)
         self.cfg = cfg
+        self.tree = app_commands.CommandTree(self)
 
         self.stt = SttPool(cfg.stt)
         self.tts = TtsPool(cfg.tts)
@@ -199,6 +198,24 @@ class BashmakBot(discord.Bot):
         self._idle_task: asyncio.Task | None = None
 
     # ------------------------------------------------------- жизненный цикл
+    async def setup_hook(self) -> None:
+        """Зарегистрировать slash-команды.
+
+        py-cord синхронизировал дерево команд сам, discord.py — нет: без
+        явного ``sync()`` команд в Discord просто не появится.
+        """
+        guild_ids = [int(g) for g in (self.cfg.discord.get("guild_ids") or [])]
+        if not guild_ids:
+            await self.tree.sync()
+            log.info("команды зарегистрированы глобально (появятся в течение часа)")
+            return
+
+        for guild_id in guild_ids:
+            guild = discord.Object(id=guild_id)
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+        log.info("команды зарегистрированы на серверах: %s", guild_ids)
+
     async def on_ready(self) -> None:
         log.info("вошёл как %s (id=%s)", self.user, self.user.id)
 
@@ -280,42 +297,45 @@ class BashmakBot(discord.Bot):
                 await session.close()
 
 
-async def _reject_dm(ctx: discord.ApplicationContext) -> bool:
+async def _reject_dm(interaction: discord.Interaction) -> bool:
     """С пустым guild_ids команды регистрируются глобально и видны в личке.
 
-    Там ``ctx.guild`` — None, и любое обращение к нему упало бы с AttributeError.
+    Там ``interaction.guild`` — None, и любое обращение к нему упало бы с
+    AttributeError.
     """
-    if ctx.guild is None:
-        await ctx.respond("Эта команда работает только на сервере.", ephemeral=True)
+    if interaction.guild is None:
+        await interaction.response.send_message("Эта команда работает только на сервере.", ephemeral=True)
         return True
     return False
 
 
 def build_bot(cfg: Config) -> BashmakBot:
     bot = BashmakBot(cfg)
-    guild_ids = list(cfg.discord.get("guild_ids", []) or []) or None
 
-    @bot.slash_command(name="start", description="Позвать Башмака в свой голосовой канал", guild_ids=guild_ids)
-    async def start(ctx: discord.ApplicationContext) -> None:
-        if await _reject_dm(ctx):
+    @bot.tree.command(name="start", description="Позвать Башмака в свой голосовой канал")
+    async def start(interaction: discord.Interaction) -> None:
+        if await _reject_dm(interaction):
             return
 
-        voice = ctx.author.voice
+        voice = interaction.user.voice
         if voice is None or voice.channel is None:
-            await ctx.respond("Сначала зайди в голосовой канал.", ephemeral=True)
+            await interaction.response.send_message("Сначала зайди в голосовой канал.", ephemeral=True)
             return
 
-        existing = bot.sessions.pop(ctx.guild.id, None)
+        existing = bot.sessions.pop(interaction.guild.id, None)
         if existing is not None:
             await existing.close()
 
-        await ctx.defer(ephemeral=True)
-        voice_client: discord.VoiceClient | None = None
+        # Дальше идёт подключение к голосу — это дольше трёх секунд, которые
+        # Discord даёт на ответ. После defer() отвечать можно только через
+        # followup.
+        await interaction.response.defer(ephemeral=True)
+        voice_client: voice_recv.VoiceRecvClient | None = None
         try:
-            voice_client = await voice.channel.connect()
+            voice_client = await voice.channel.connect(cls=voice_recv.VoiceRecvClient)
             session = GuildSession(bot, voice_client)
             await session.start()
-            bot.sessions[ctx.guild.id] = session
+            bot.sessions[interaction.guild.id] = session
         except Exception:
             log.exception("не смог зайти в голосовой канал")
             # Соединение могло уже подняться — без этого бот молча висел бы в
@@ -324,27 +344,29 @@ def build_bot(cfg: Config) -> BashmakBot:
             if voice_client is not None:
                 with contextlib.suppress(Exception):
                     await voice_client.disconnect(force=True)
-            await ctx.respond("Не получилось подключиться — посмотри логи.", ephemeral=True)
+            await interaction.followup.send("Не получилось подключиться — посмотри логи.", ephemeral=True)
             return
 
-        await ctx.respond(f"Слушаю в #{voice.channel.name}. Зови по имени: «Башмак, ...»", ephemeral=True)
+        await interaction.followup.send(
+            f"Слушаю в #{voice.channel.name}. Зови по имени: «Башмак, ...»", ephemeral=True
+        )
 
-    @bot.slash_command(name="leave", description="Выгнать Башмака из голосового канала", guild_ids=guild_ids)
-    async def leave(ctx: discord.ApplicationContext) -> None:
-        if await _reject_dm(ctx):
+    @bot.tree.command(name="leave", description="Выгнать Башмака из голосового канала")
+    async def leave(interaction: discord.Interaction) -> None:
+        if await _reject_dm(interaction):
             return
-        session = bot.sessions.pop(ctx.guild.id, None)
+        session = bot.sessions.pop(interaction.guild.id, None)
         if session is None:
-            await ctx.respond("Меня и так нигде нет.", ephemeral=True)
+            await interaction.response.send_message("Меня и так нигде нет.", ephemeral=True)
             return
         await session.close()
-        await ctx.respond("Вышел.", ephemeral=True)
+        await interaction.response.send_message("Вышел.", ephemeral=True)
 
-    @bot.slash_command(name="status", description="Что сейчас происходит", guild_ids=guild_ids)
-    async def status(ctx: discord.ApplicationContext) -> None:
-        if await _reject_dm(ctx):
+    @bot.tree.command(name="status", description="Что сейчас происходит")
+    async def status(interaction: discord.Interaction) -> None:
+        if await _reject_dm(interaction):
             return
-        session = bot.sessions.get(ctx.guild.id)
+        session = bot.sessions.get(interaction.guild.id)
         lines = [
             f"llama-server: {'готов' if await bot.llm.health() else 'НЕ ОТВЕЧАЕТ'}",
             f"очередь к LLM: {bot.llm_queue.depth}",
@@ -363,16 +385,16 @@ def build_bot(cfg: Config) -> BashmakBot:
                 lines.append(f"музыка: {track.title}{suffix}")
             if session.player.queued:
                 lines.append(f"в очереди треков: {len(session.player.queued)}")
-        await ctx.respond("\n".join(lines), ephemeral=True)
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
-    @bot.slash_command(name="forget", description="Забыть историю разговора", guild_ids=guild_ids)
-    async def forget(ctx: discord.ApplicationContext) -> None:
-        if await _reject_dm(ctx):
+    @bot.tree.command(name="forget", description="Забыть историю разговора")
+    async def forget(interaction: discord.Interaction) -> None:
+        if await _reject_dm(interaction):
             return
-        session = bot.sessions.get(ctx.guild.id)
+        session = bot.sessions.get(interaction.guild.id)
         if session is not None:
             bot.llm_queue.reset(session.channel_id)
-        await ctx.respond("Забыл, о чём говорили.", ephemeral=True)
+        await interaction.response.send_message("Забыл, о чём говорили.", ephemeral=True)
 
     return bot
 
@@ -381,9 +403,9 @@ def main() -> None:
     cfg = load_config()
     setup_logging(cfg)
     log.info("Башмак стартует (конфиг: %s, профиль: %s)", cfg.source, cfg.get("profile", "?"))
-    # Строго до первого подключения к голосу: заплатки ставятся на классы,
-    # а декриптор разбирает методы по имени режима в своём __init__.
-    pycord_patch.apply()
+    # До первого подключения к голосу: расшифровка DAVE и живучесть приёма
+    # (см. bashmak/audio/voice_recv_patch.py).
+    voice_recv_patch.apply()
 
     bot = build_bot(cfg)
     try:
