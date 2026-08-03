@@ -130,6 +130,9 @@ class Segmenter:
         self._silence_run = 0
         self._speech_windows = 0
         self._in_speech = False
+        #: Оценка последнего окна. Нужна только для диагностики в listener.py:
+        #: без неё «тишина в канале» и «шум вместо речи» в логе неразличимы.
+        self.last_probability = 0.0
 
     @property
     def in_speech(self) -> bool:
@@ -166,6 +169,8 @@ class Segmenter:
                 # и идём дальше — хуже быть не может, а поток жив.
                 log.exception("user=%s: VAD упал на окне, считаю его тишиной", self.user_id)
                 probability = 0.0
+
+            self.last_probability = probability
 
             if not self._in_speech:
                 self._preroll.append(window)

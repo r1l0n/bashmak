@@ -86,7 +86,10 @@ def setup_logging(cfg: Any = None) -> None:
 
     # Эти двое очень болтливы на DEBUG и топят полезное.
     logging.getLogger("discord").setLevel(max(level, logging.WARNING))
-    logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
+    # httpcore отдельно: это транспорт под httpx, и на DEBUG он пишет по
+    # десятку строк на каждый запрос к llama-server.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
 
     # А эти двое болтливы на INFO, то есть даже когда discord поднимают до
     # INFO ради отладки голоса. reader пишет строку на каждый RTCP-отчёт

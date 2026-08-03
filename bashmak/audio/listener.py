@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Awaitable, Callable
+
+import numpy as np
 
 from ..stt.whisper_worker import SttPool, Transcript
 from ..utils.logging import current_cid, guard, new_cid
@@ -35,6 +38,8 @@ IDLE_DROP_SECONDS = 60.0
 #: миллисекунд — а это пропущенные heartbeat'ы Discord и разрыв соединения.
 #: С лимитом отставание разгребается за несколько тиков, по 16 окон за раз.
 MAX_VAD_WINDOWS_PER_TICK = 16
+#: Как часто писать сводку «сколько звука пришло и что о нём думает VAD».
+LEVEL_REPORT_INTERVAL = 5.0
 
 
 class VoiceListener:
@@ -57,6 +62,9 @@ class VoiceListener:
         self._segmenters: dict[int, Segmenter] = {}
         self._task: asyncio.Task | None = None
         self._jobs: set[asyncio.Task] = set()
+        #: user_id → [начало окна, пик амплитуды, макс. оценка VAD, сэмплов]
+        self._levels: dict[int, list[float]] = {}
+        self._rate = int(cfg.audio.work_sample_rate)
 
         # Модель грузится один раз, состояние у каждого говорящего своё.
         self._vad_path = self._vad_cfg.path("model_path")
@@ -89,6 +97,7 @@ class VoiceListener:
             await asyncio.gather(*jobs, return_exceptions=True)
         self._jobs.clear()
         self._segmenters.clear()
+        self._levels.clear()
         self.registry.clear()
         log.info("слушатель голоса остановлен")
 
@@ -135,6 +144,8 @@ class VoiceListener:
             else []
         )
 
+        self._report_level(stream.user_id, samples, segmenter)
+
         if not samples.size and not segmenter.pending:
             idle = stream.idle_seconds
             if segmenter.in_speech and idle > self._hangover:
@@ -144,10 +155,43 @@ class VoiceListener:
                     segments.append(tail)
             elif idle > IDLE_DROP_SECONDS:
                 self._segmenters.pop(stream.user_id, None)
+                self._levels.pop(stream.user_id, None)
                 self.sink.forget(stream.user_id)
 
         for segment in segments:
             self._dispatch(segment)
+
+    def _report_level(self, user_id: int, samples: np.ndarray, segmenter: Segmenter) -> None:
+        """Сводка раз в ``LEVEL_REPORT_INTERVAL``: громкость входа и оценка VAD.
+
+        Единственный способ отличить «никто не говорил» от «в кадрах шум
+        вместо речи»: аудио доходит до буферов в обоих случаях, фраз не
+        закрывается тоже в обоих, и в логе одинаково пусто. Пик около нуля —
+        приходит тишина; пик заметный при оценке VAD в нуле — приходит не речь.
+        """
+        now = time.monotonic()
+        stat = self._levels.get(user_id)
+        if stat is None:
+            self._levels[user_id] = stat = [now, 0.0, 0.0, 0.0]
+
+        if samples.size:
+            stat[1] = max(stat[1], float(np.abs(samples).max()))
+            stat[3] += samples.size
+        stat[2] = max(stat[2], segmenter.last_probability)
+
+        if now - stat[0] < LEVEL_REPORT_INTERVAL or not stat[3]:
+            return
+
+        log.debug(
+            "user=%s: за %.0f с пришло %.1f с аудио, пик %.3f, макс. речь по VAD %.2f (порог %.2f)",
+            user_id,
+            now - stat[0],
+            stat[3] / self._rate,
+            stat[1],
+            stat[2],
+            segmenter.threshold,
+        )
+        self._levels[user_id] = [now, 0.0, 0.0, 0.0]
 
     def _dispatch(self, segment: Segment) -> None:
         """Отправить фразу в STT, не блокируя опрос буферов."""
