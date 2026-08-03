@@ -34,7 +34,16 @@ from .music.player import MusicPlayer
 from .output.arbiter import OutputArbiter
 from .stt.whisper_worker import SttPool, Transcript
 from .tts.silero_worker import TtsPool
-from .utils.logging import current_cid, guard, setup_logging, stage
+from .utils.logging import (
+    current_cid,
+    guard,
+    setup_logging,
+    stage,
+    stage_summary,
+    turn_drop,
+    turn_note,
+    turn_report,
+)
 from .wakeword.filter import WakeWordFilter
 
 log = logging.getLogger(__name__)
@@ -112,6 +121,9 @@ class GuildSession:
             await self.arbiter.speak(self.bot.tts.stream(text))
         except Exception:
             log.exception("не смог озвучить ответ: %r", text)
+        finally:
+            # Речь отзвучала — реплика отработала целиком, можно печатать отчёт.
+            turn_report()
 
     # -------------------------------------------------------- пайплайн ----
     async def _on_transcript(self, transcript: Transcript) -> None:
@@ -120,9 +132,12 @@ class GuildSession:
 
         if match is None:
             log.debug("%s (мимо): %s", speaker, transcript.text)
+            # Реплика не наша: отчёта не будет, замеры её stt держать незачем.
+            turn_drop()
             return
 
-        log.info("обращение от %s (score=%.0f): %r", speaker, match.score, match.payload)
+        turn_note(speaker=speaker, heard=transcript.text)
+        log.debug("обращение от %s (score=%.0f): %r", speaker, match.score, match.payload)
 
         with stage(log, "intent"):
             decision = await self.bot.router.route(
@@ -169,6 +184,8 @@ class GuildSession:
             log.exception("музыкальная команда %s упала", decision.intent.value)
             answer = "С музыкой что-то не так, посмотри логи."
 
+        # Музыка идёт мимо ЛЛМ — в отчёте показываем команду и что ответили.
+        turn_note(sent=f"команда {decision.intent.value}", reply=answer)
         await self.say(answer)
 
 
@@ -416,7 +433,11 @@ def build_bot(cfg: Config) -> BashmakBot:
                 lines.append(f"музыка: {track.title}{suffix}")
             if session.player.queued:
                 lines.append(f"в очереди треков: {len(session.player.queued)}")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+        lines.append("")
+        lines.extend(stage_summary())
+        await interaction.response.send_message(
+            "```\n" + "\n".join(lines) + "\n```", ephemeral=True
+        )
 
     return bot
 

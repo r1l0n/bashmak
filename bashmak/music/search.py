@@ -103,5 +103,5 @@ async def search(query: str, timeout: float = 20.0) -> Track:
     except Exception as exc:  # yt-dlp кидает свои типы ошибок на каждый чих
         raise SearchError(f"не смог найти {query!r}: {exc}") from exc
 
-    log.info("найден трек: %s (%s)", track.title, track.page_url)
+    log.debug("найден трек: %s (%s)", track.title, track.page_url)
     return track

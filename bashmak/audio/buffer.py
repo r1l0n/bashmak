@@ -87,7 +87,7 @@ class StreamRegistry:
             if stream is None:
                 stream = UserStream(user_id, self._max_seconds, self._rate)
                 self._streams[user_id] = stream
-                log.info("новый источник аудио: user=%s", user_id)
+                log.debug("новый источник аудио: user=%s", user_id)
             return stream
 
     def snapshot(self) -> list[UserStream]:
@@ -97,7 +97,7 @@ class StreamRegistry:
     def drop(self, user_id: int) -> None:
         with self._lock:
             if self._streams.pop(user_id, None) is not None:
-                log.info("источник аудио закрыт: user=%s", user_id)
+                log.debug("источник аудио закрыт: user=%s", user_id)
 
     def clear(self) -> None:
         with self._lock:

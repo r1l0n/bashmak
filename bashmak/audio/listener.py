@@ -212,7 +212,7 @@ class VoiceListener:
         if transcript is None:
             return
 
-        log.info("распознано: %r", transcript.text)
+        log.debug("распознано: %r", transcript.text)
         try:
             await self._on_transcript(transcript)
         except Exception:

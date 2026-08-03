@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from ..utils.logging import current_cid, guard, stage
+from ..utils.logging import current_cid, guard, stage, turn_note
 from .client import LlmClient
 from .persona import build_messages, clean_reply
 
@@ -105,6 +105,10 @@ class LlmQueue:
                 self._queue.task_done()
 
     async def _handle(self, task: ChatTask) -> None:
+        # До запроса, а не после: если модель упадёт, в отчёте всё равно должно
+        # быть видно, что именно ей отправляли.
+        turn_note(sent=f"{task.speaker}: {task.text}")
+
         with stage(log, "llm", queue=self._queue.qsize()) as info:
             raw = await self._client.complete(build_messages(task.speaker, task.text))
             info["chars"] = len(raw)
@@ -118,7 +122,7 @@ class LlmQueue:
             log.warning("LLM вернула пустой ответ на %r", task.text)
             return
 
-        log.info("ответ: %r", reply)
+        turn_note(reply=reply)
 
         # Озвучка идёт отдельным таском: ждать её здесь значило бы держать
         # очередь простаивающей всё время проигрывания (ответ на 15 секунд —

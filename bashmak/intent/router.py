@@ -146,14 +146,14 @@ class IntentRouter:
     async def route(self, text: str, *, music_playing: bool = False) -> Decision:
         decision = classify_by_rules(text, music_playing=music_playing)
         if decision is not None:
-            log.info("intent=%s (regex) query=%r", decision.intent.value, decision.query)
+            log.debug("intent=%s (regex) query=%r", decision.intent.value, decision.query)
             return decision
 
         if not self._should_ask_llm(text):
             return Decision(intent=Intent.CHAT, source="default")
 
         decision = await self._classify_by_llm(text)
-        log.info("intent=%s (%s) query=%r", decision.intent.value, decision.source, decision.query)
+        log.debug("intent=%s (%s) query=%r", decision.intent.value, decision.source, decision.query)
         return decision
 
     def _should_ask_llm(self, text: str) -> bool:
