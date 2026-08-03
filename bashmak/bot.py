@@ -21,6 +21,7 @@ import time
 
 import discord
 
+from .audio import pycord_patch
 from .audio.listener import VoiceListener
 from .config import Config, load_config
 from .intent.router import Decision, Intent, IntentRouter
@@ -37,40 +38,6 @@ from .wakeword.filter import WakeWordFilter
 log = logging.getLogger(__name__)
 
 IDLE_CHECK_INTERVAL = 30.0
-
-
-def disable_dave() -> None:
-    """Отказаться от E2EE в голосе — иначе приём не декодируется.
-
-    ``py-cord[voice]`` тянет пакет ``davey``, из-за чего библиотека объявляет
-    в IDENTIFY ``max_dave_protocol_version: 1``, и Discord включает для
-    звонка сквозное шифрование. Расшифровывать его py-cord 2.8.1 не умеет:
-    в ``PacketDecoder._decode_packet`` сначала зовётся ``opus_decode`` и
-    только потом ``dave.decrypt`` — порядок обратный, DAVE шифрует именно
-    Opus-кадры. В итоге декодеру достаётся шифротекст, первый же пакет речи
-    падает с ``OpusError('corrupted stream')`` и уносит поток приёма целиком.
-
-    ``max_dave_proto_version`` — property, читающая модульную константу, так
-    что правим константу. Версию для звонка Discord берёт как минимум по
-    участникам: объявленный ноль просто снимает E2EE, пока бот в канале, —
-    ровно как любой клиент без поддержки DAVE. Когда приём в py-cord
-    починят, эту функцию нужно убрать.
-    """
-    from discord.voice import state as voice_state
-    from discord.voice.utils import dependencies as voice_deps
-
-    modules = (voice_deps, voice_state)
-    if not any(hasattr(module, "DAVE_PROTOCOL_VERSION") for module in modules):
-        log.warning(
-            "не нашёл DAVE_PROTOCOL_VERSION в py-cord %s — если приём голоса "
-            "падает с OpusError, смотрите disable_dave()",
-            discord.__version__,
-        )
-        return
-
-    for module in modules:
-        module.DAVE_PROTOCOL_VERSION = 0
-    log.info("E2EE (DAVE) для голоса отключён: py-cord не умеет его принимать")
 
 
 class GuildSession:
@@ -414,8 +381,9 @@ def main() -> None:
     cfg = load_config()
     setup_logging(cfg)
     log.info("Башмак стартует (конфиг: %s, профиль: %s)", cfg.source, cfg.get("profile", "?"))
-    # Строго до первого подключения к голосу: правка читается в IDENTIFY.
-    disable_dave()
+    # Строго до первого подключения к голосу: заплатки ставятся на классы,
+    # а декриптор разбирает методы по имени режима в своём __init__.
+    pycord_patch.apply()
 
     bot = build_bot(cfg)
     try:
