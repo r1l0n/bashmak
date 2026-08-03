@@ -115,10 +115,13 @@ def _fmt(info: dict[str, Any]) -> str:
     return " (" + ", ".join(f"{k}={v}" for k, v in info.items()) + ")"
 
 
-def guard(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+def guard(name: str, *, reraise: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Декоратор для фоновых корутин: падение логируется, а не теряется.
 
     CancelledError пробрасывается как есть — это штатное завершение.
+
+    ``reraise=False`` — для вечных циклов: их таск никто не ждёт, так что
+    пробрасывать исключение некуда, а в логе оно и так уже есть.
     """
 
     def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -133,7 +136,9 @@ def guard(name: str) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
                 raise
             except Exception:
                 logger.exception("%s: упал с необработанным исключением", name)
-                raise
+                if reraise:
+                    raise
+                return None
 
         return wrapper
 

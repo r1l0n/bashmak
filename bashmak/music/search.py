@@ -8,11 +8,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import yt_dlp
 
 log = logging.getLogger(__name__)
+
+#: Свой пул, а не общий executor лупа.
+#:
+#: ``asyncio.wait_for`` снимает ожидание, но не сам поток: yt-dlp продолжает
+#: висеть на сети до своего socket_timeout. На дефолтном executor'е серия
+#: неудачных поисков забила бы его насмерть — вместе со всеми остальными
+#: run_in_executor в процессе. Здесь же худший случай локален: поиск подождёт
+#: освободившийся слот и вернёт «не нашёл».
+_EXECUTOR: ThreadPoolExecutor | None = None
 
 _YDL_OPTIONS = {
     "format": "bestaudio/best",
@@ -66,11 +76,26 @@ def _extract(query: str) -> Track:
     )
 
 
+def _executor() -> ThreadPoolExecutor:
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ytdlp")
+    return _EXECUTOR
+
+
+def shutdown() -> None:
+    """Закрыть пул поиска. Зависшие потоки не ждём — они умрут по таймауту сокета."""
+    global _EXECUTOR
+    if _EXECUTOR is not None:
+        _EXECUTOR.shutdown(wait=False, cancel_futures=True)
+        _EXECUTOR = None
+
+
 async def search(query: str, timeout: float = 20.0) -> Track:
     """Найти трек по названию или ссылке."""
     loop = asyncio.get_running_loop()
     try:
-        track = await asyncio.wait_for(loop.run_in_executor(None, _extract, query), timeout)
+        track = await asyncio.wait_for(loop.run_in_executor(_executor(), _extract, query), timeout)
     except asyncio.TimeoutError as exc:
         raise SearchError(f"поиск {query!r} занял больше {timeout:.0f} с") from exc
     except SearchError:

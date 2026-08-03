@@ -135,13 +135,27 @@ class Segmenter:
     def in_speech(self) -> bool:
         return self._in_speech
 
-    def feed(self, samples: np.ndarray) -> list[Segment]:
-        """Скормить кусок аудио, получить завершившиеся за это время фразы."""
+    @property
+    def pending(self) -> bool:
+        """Остались ли необработанные окна — например, после лимита ``max_windows``."""
+        return self._tail.size >= self.window_samples
+
+    def feed(self, samples: np.ndarray, max_windows: int | None = None) -> list[Segment]:
+        """Скормить кусок аудио, получить завершившиеся за это время фразы.
+
+        ``max_windows`` ограничивает число инференсов за один вызов: остаток
+        доживёт в ``_tail`` до следующего. Нужно вызывающему, который крутится
+        в event loop и не может позволить себе сотни инференсов подряд.
+        """
         segments: list[Segment] = []
         if samples.size:
             self._tail = np.concatenate((self._tail, samples)) if self._tail.size else samples
 
+        processed = 0
         while self._tail.size >= self.window_samples:
+            if max_windows is not None and processed >= max_windows:
+                break
+            processed += 1
             window = self._tail[: self.window_samples]
             self._tail = self._tail[self.window_samples :]
 

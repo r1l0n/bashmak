@@ -29,6 +29,11 @@ class LlmClient:
             timeout=httpx.Timeout(timeout, connect=10.0),
             limits=httpx.Limits(max_connections=4),
         )
+        # Инвариант «один инференс за раз» держится здесь, а не только в
+        # очереди: мимо очереди в LLM ходит ещё и intent-классификатор.
+        # Без этого его запрос вставал бы в очередь уже на самом llama-server
+        # (--parallel 1), и request_timeout_s тикал бы всё это ожидание.
+        self._inference = asyncio.Lock()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -83,16 +88,17 @@ class LlmClient:
         log.debug("запрос к LLM: %s", payload["messages"])
 
         last_error: Exception | None = None
-        for attempt in range(retries + 1):
-            try:
-                response = await self._client.post("/v1/chat/completions", json=payload)
-                response.raise_for_status()
-                data = response.json()
-                return (data["choices"][0]["message"]["content"] or "").strip()
-            except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
-                last_error = exc
-                if attempt < retries:
-                    log.warning("LLM-запрос не удался (%s), повтор %d", exc, attempt + 1)
-                    await asyncio.sleep(1.0)
+        async with self._inference:
+            for attempt in range(retries + 1):
+                try:
+                    response = await self._client.post("/v1/chat/completions", json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    return (data["choices"][0]["message"]["content"] or "").strip()
+                except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+                    last_error = exc
+                    if attempt < retries:
+                        log.warning("LLM-запрос не удался (%s), повтор %d", exc, attempt + 1)
+                        await asyncio.sleep(1.0)
 
         raise LlmError(f"llama-server не ответил: {last_error}") from last_error

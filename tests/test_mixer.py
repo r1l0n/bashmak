@@ -7,7 +7,14 @@ import asyncio
 import numpy as np
 import pytest
 
-from bashmak.output.arbiter import FRAME_BYTES, FRAME_SAMPLES, SILENCE, MixerSource
+from bashmak.output import arbiter as arbiter_module
+from bashmak.output.arbiter import (
+    FRAME_BYTES,
+    FRAME_SAMPLES,
+    SILENCE,
+    MixerSource,
+    OutputArbiter,
+)
 
 
 @pytest.fixture()
@@ -87,19 +94,42 @@ def test_music_is_ducked_while_speaking(loop):
 
 def test_finished_track_is_released_and_reported(loop):
     ended = []
-    mixer = MixerSource(loop=loop, on_music_end=lambda: ended.append(True))
+    mixer = MixerSource(loop=loop, on_music_end=ended.append)
     source = FakeMusic([frame(100)])
     mixer.set_music(source)
 
     mixer.read()  # единственный кадр
     assert mixer.read() == SILENCE  # источник иссяк
     assert not mixer.has_music
-    assert source.cleaned
 
-    # Колбэк уходит в луп через call_soon_threadsafe — прокрутим луп разок.
+    # И колбэк, и cleanup() уходят в луп через call_soon_threadsafe:
+    # cleanup() у ffmpeg блокирующий, а поток плеера этого не переживёт.
+    assert not source.cleaned, "cleanup не должен вызываться из аудио-потока"
     loop.call_soon(loop.stop)
     loop.run_forever()
-    assert ended == [True]
+
+    assert source.cleaned
+    # Колбэк получает сам источник — иначе плеер не отличит «мой трек кончился»
+    # от «кончился тот, что я уже снял».
+    assert ended == [source]
+
+
+def test_stale_track_end_is_distinguishable(loop):
+    """Трек кончился ровно в момент skip(): колбэк должен нести старый источник."""
+    ended = []
+    mixer = MixerSource(loop=loop, on_music_end=ended.append)
+    finished = FakeMusic([])
+    mixer.set_music(finished)
+
+    mixer.read()  # источник сразу пуст → запланирован колбэк
+    replacement = FakeMusic([frame(100)])
+    mixer.set_music(replacement)
+
+    loop.call_soon(loop.stop)
+    loop.run_forever()
+
+    assert ended == [finished]
+    assert ended[0] is not replacement
 
 
 def test_mix_does_not_overflow_int16(loop):
@@ -129,3 +159,58 @@ def test_volume_is_clamped(loop):
     mixer = MixerSource(loop=loop, volume=1.0)
     assert mixer.set_volume(5.0) == 1.5
     assert mixer.set_volume(-1.0) == 0.0
+
+
+def test_ducking_stays_relative_on_low_volume(loop):
+    """Громкость ниже duck_volume не должна инвертировать даккинг."""
+    mixer = MixerSource(loop=loop, volume=0.5, duck_volume=0.25, fade_ms=20)
+    mixer.set_volume(0.2)  # две команды «потише» — тише абсолютного порога
+
+    payload = frame(10000)
+    mixer.set_music(FakeMusic([payload, payload]))
+
+    idle = np.frombuffer(mixer.read(), dtype="<i2").max()
+    mixer.push_tts(frame(1))
+    ducked = np.frombuffer(mixer.read(), dtype="<i2").max()
+
+    assert ducked < idle, "пока бот говорит, музыка обязана становиться тише"
+
+
+def test_drained_is_not_set_while_next_chunk_arrives(loop):
+    """Гонка на drained: отложенный set() не должен отпускать непустой буфер."""
+    mixer = MixerSource(loop=loop)
+    mixer.push_tts(frame(100))
+
+    mixer.read()  # буфер опустел → set() запланирован в луп
+    mixer.push_tts(frame(200))  # но приехал следующий кусок той же реплики
+
+    loop.call_soon(loop.stop)
+    loop.run_forever()
+
+    assert not mixer.drained.is_set()
+    assert mixer.speaking
+
+
+class FakeConfig:
+    """Мини-заглушка Config: арбитру нужна только секция music."""
+
+    class _Music:
+        @staticmethod
+        def get(name, default=None):
+            return default
+
+    music = _Music()
+
+
+def test_speak_gives_up_when_player_is_dead(loop, monkeypatch):
+    """Голосовое соединение отвалилось — speak() обязан отпустить очередь LLM."""
+    monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)
+    out = OutputArbiter(FakeConfig(), loop)
+
+    async def chunks():
+        yield np.full(480, 1000, dtype="<i2").tobytes(), 48000
+
+    # read() никто не зовёт: плеера нет, drained не наступит никогда.
+    loop.run_until_complete(asyncio.wait_for(out.speak(chunks()), 5.0))
+
+    assert not out.source.speaking

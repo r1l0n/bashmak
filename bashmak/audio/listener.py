@@ -26,6 +26,15 @@ log = logging.getLogger(__name__)
 POLL_INTERVAL = 0.03
 #: Столько молчит участник — закрываем его сегментер и освобождаем память.
 IDLE_DROP_SECONDS = 60.0
+#: Максимум окон VAD на одного говорящего за тик опроса.
+#:
+#: Инференс Silero синхронный и считается прямо в лупе. В штатном режиме это
+#: одно окно (32 мс речи) на тик (30 мс) — доли процента CPU. Но буфер держит
+#: до 30 секунд, и после любой заминки (GC, спавн воркера STT) один вызов
+#: прогнал бы под тысячу инференсов подряд и заблокировал луп на сотни
+#: миллисекунд — а это пропущенные heartbeat'ы Discord и разрыв соединения.
+#: С лимитом отставание разгребается за несколько тиков, по 16 окон за раз.
+MAX_VAD_WINDOWS_PER_TICK = 16
 
 
 class VoiceListener:
@@ -71,8 +80,13 @@ class VoiceListener:
                 pass
             self._task = None
 
-        for job in list(self._jobs):
+        jobs = list(self._jobs)
+        for job in jobs:
             job.cancel()
+        if jobs:
+            # Именно дождаться, а не только отменить: иначе на остановке
+            # прилетит «Task was destroyed but it is pending».
+            await asyncio.gather(*jobs, return_exceptions=True)
         self._jobs.clear()
         self._segmenters.clear()
         self.registry.clear()
@@ -94,11 +108,16 @@ class VoiceListener:
             self._segmenters[user_id] = segmenter
         return segmenter
 
-    @guard("слушатель голоса")
+    @guard("слушатель голоса", reraise=False)
     async def _run(self) -> None:
         while True:
             await asyncio.sleep(POLL_INTERVAL)
-            for stream in self.registry.snapshot():
+            try:
+                streams = self.registry.snapshot()
+            except Exception:
+                log.exception("не смог получить список источников аудио")
+                continue
+            for stream in streams:
                 try:
                     self._process_stream(stream)
                 except Exception:
@@ -109,9 +128,14 @@ class VoiceListener:
         samples = stream.drain()
         segmenter = self._segmenter_for(stream.user_id)
 
-        segments = segmenter.feed(samples) if samples.size else []
+        # pending — остаток, не разобранный на прошлом тике из-за лимита окон.
+        segments = (
+            segmenter.feed(samples, max_windows=MAX_VAD_WINDOWS_PER_TICK)
+            if samples.size or segmenter.pending
+            else []
+        )
 
-        if not samples.size:
+        if not samples.size and not segmenter.pending:
             idle = stream.idle_seconds
             if segmenter.in_speech and idle > self._hangover:
                 tail = segmenter.flush()

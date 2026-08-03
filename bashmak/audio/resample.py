@@ -39,6 +39,16 @@ class StreamResampler:
             return self._stream.resample_chunk(mono)
         return soxr.resample(mono, self.in_rate, self.out_rate)
 
+    def flush(self) -> np.ndarray:
+        """Дослать хвост, застрявший в фильтре. Вызывается в конце потока."""
+        if self._stream is None:
+            return np.zeros(0, dtype=np.float32)
+        try:
+            return self._stream.resample_chunk(np.zeros(0, dtype=np.float32), last=True)
+        except TypeError:
+            # Сборка soxr без параметра last — хвост просто теряется (единицы мс).
+            return np.zeros(0, dtype=np.float32)
+
 
 def discord_pcm_to_mono(data: bytes) -> np.ndarray:
     """48 кГц stereo s16le (как отдаёт py-cord) → 48 кГц моно float32 в [-1, 1]."""
@@ -51,18 +61,33 @@ def discord_pcm_to_mono(data: bytes) -> np.ndarray:
     return stereo.mean(axis=1, dtype=np.float32) / 32768.0
 
 
-def mono_to_discord_pcm(mono: np.ndarray, src_rate: int) -> bytes:
-    """Моно (int16 или float32) с частотой src_rate → 48 кГц stereo s16le."""
-    if mono.size == 0:
-        return b""
-
+def to_float_mono(mono: np.ndarray) -> np.ndarray:
+    """Моно int16 или float32 → float32 в [-1, 1]."""
     samples = mono.astype(np.float32)
     if mono.dtype == np.int16:
         samples /= 32768.0
+    return samples
 
-    if src_rate != DISCORD_RATE:
-        samples = soxr.resample(samples, src_rate, DISCORD_RATE)
 
+def float_mono_to_discord_pcm(samples: np.ndarray) -> bytes:
+    """Моно float32 на 48 кГц → 48 кГц stereo s16le. Ресемплинг уже сделан."""
+    if samples.size == 0:
+        return b""
     clipped = np.clip(samples * 32767.0, -32768.0, 32767.0).astype("<i2")
     stereo = np.repeat(clipped[:, np.newaxis], DISCORD_CHANNELS, axis=1)
     return stereo.tobytes()
+
+
+def mono_to_discord_pcm(mono: np.ndarray, src_rate: int) -> bytes:
+    """Моно (int16 или float32) с частотой src_rate → 48 кГц stereo s16le.
+
+    Разовое преобразование без состояния. Для потока кусков (TTS) берите
+    :class:`StreamResampler`, иначе на стыках появятся щелчки.
+    """
+    if mono.size == 0:
+        return b""
+
+    samples = to_float_mono(mono)
+    if src_rate != DISCORD_RATE:
+        samples = soxr.resample(samples, src_rate, DISCORD_RATE)
+    return float_mono_to_discord_pcm(samples)

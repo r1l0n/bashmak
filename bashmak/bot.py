@@ -26,6 +26,7 @@ from .config import Config, load_config
 from .intent.router import Decision, Intent, IntentRouter
 from .llm.client import LlmClient
 from .llm.queue_manager import ChatTask, LlmQueue
+from .music import search as music_search
 from .music.player import MusicPlayer
 from .output.arbiter import OutputArbiter
 from .stt.whisper_worker import SttPool, Transcript
@@ -60,7 +61,11 @@ class GuildSession:
         self.voice_client.play(self.arbiter.source)
         self.voice_client.start_recording(self.listener.sink, self._on_recording_stop)
         self.listener.start()
-        log.info("сессия запущена в #%s (%s)", self.voice_client.channel.name, self.guild.name)
+        log.info(
+            "сессия запущена в #%s (%s)",
+            getattr(self.voice_client.channel, "name", "?"),
+            self.guild.name,
+        )
 
     async def close(self) -> None:
         self.arbiter.interrupt()
@@ -102,7 +107,7 @@ class GuildSession:
         match = self.bot.wakeword.match(transcript.text)
 
         if match is None:
-            # Реплика не боту, но пусть останется контекстом разговора.
+            # Реплика не боту: запоминаем как фон, не как ход диалога.
             self.bot.llm_queue.note_user_line(self.channel_id, speaker, transcript.text)
             log.debug("%s (мимо): %s", speaker, transcript.text)
             return
@@ -110,7 +115,10 @@ class GuildSession:
         log.info("обращение от %s (score=%.0f): %r", speaker, match.score, match.payload)
 
         with stage(log, "intent"):
-            decision = await self.bot.router.route(match.payload)
+            decision = await self.bot.router.route(
+                match.payload,
+                music_playing=self.player.current is not None,
+            )
 
         if decision.intent is Intent.CHAT:
             await self.bot.llm_queue.submit(
@@ -196,6 +204,11 @@ class BashmakBot(discord.Bot):
         log.info("останавливаюсь...")
         if self._idle_task is not None:
             self._idle_task.cancel()
+            # Дождаться отмены, иначе на выходе прилетит
+            # «Task was destroyed but it is pending».
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._idle_task
+            self._idle_task = None
         for session in list(self.sessions.values()):
             await session.close()
         self.sessions.clear()
@@ -204,6 +217,7 @@ class BashmakBot(discord.Bot):
         await self.llm.close()
         self.stt.close()
         self.tts.close()
+        music_search.shutdown()
         await super().close()
         log.info("остановлен")
 
@@ -221,7 +235,7 @@ class BashmakBot(discord.Bot):
                 return session
         return None
 
-    @guard("сторож простоя")
+    @guard("сторож простоя", reraise=False)
     async def _idle_watch(self) -> None:
         """Выйти из канала, где давно никого нет, чтобы не жечь CPU впустую."""
         timeout = float(self.cfg.discord.get("idle_leave_seconds", 900))
@@ -229,18 +243,37 @@ class BashmakBot(discord.Bot):
             await asyncio.sleep(IDLE_CHECK_INTERVAL)
             if timeout <= 0:
                 continue
-            for guild_id, session in list(self.sessions.items()):
-                channel = session.voice_client.channel
-                humans = [m for m in getattr(channel, "members", []) if not m.bot]
-                if humans:
-                    session.empty_since = None
-                    continue
-                if session.empty_since is None:
-                    session.empty_since = time.monotonic()
-                elif time.monotonic() - session.empty_since > timeout:
-                    log.info("в #%s никого — выхожу", channel.name)
-                    await session.close()
-                    self.sessions.pop(guild_id, None)
+            # Тело цикла целиком под try: любая ошибка (например, канал отвалился
+            # и стал None) не должна убивать сторожа до конца жизни процесса.
+            try:
+                await self._drop_empty_sessions(timeout)
+            except Exception:
+                log.exception("сторож простоя: не смог проверить каналы")
+
+    async def _drop_empty_sessions(self, timeout: float) -> None:
+        for guild_id, session in list(self.sessions.items()):
+            channel = session.voice_client.channel
+            humans = [m for m in getattr(channel, "members", []) if not m.bot]
+            if humans:
+                session.empty_since = None
+                continue
+            if session.empty_since is None:
+                session.empty_since = time.monotonic()
+            elif time.monotonic() - session.empty_since > timeout:
+                log.info("в #%s никого — выхожу", getattr(channel, "name", "?"))
+                self.sessions.pop(guild_id, None)
+                await session.close()
+
+
+async def _reject_dm(ctx: discord.ApplicationContext) -> bool:
+    """С пустым guild_ids команды регистрируются глобально и видны в личке.
+
+    Там ``ctx.guild`` — None, и любое обращение к нему упало бы с AttributeError.
+    """
+    if ctx.guild is None:
+        await ctx.respond("Эта команда работает только на сервере.", ephemeral=True)
+        return True
+    return False
 
 
 def build_bot(cfg: Config) -> BashmakBot:
@@ -249,6 +282,9 @@ def build_bot(cfg: Config) -> BashmakBot:
 
     @bot.slash_command(name="join", description="Позвать Башмака в свой голосовой канал", guild_ids=guild_ids)
     async def join(ctx: discord.ApplicationContext) -> None:
+        if await _reject_dm(ctx):
+            return
+
         voice = ctx.author.voice
         if voice is None or voice.channel is None:
             await ctx.respond("Сначала зайди в голосовой канал.", ephemeral=True)
@@ -259,6 +295,7 @@ def build_bot(cfg: Config) -> BashmakBot:
             await existing.close()
 
         await ctx.defer(ephemeral=True)
+        voice_client: discord.VoiceClient | None = None
         try:
             voice_client = await voice.channel.connect()
             session = GuildSession(bot, voice_client)
@@ -266,6 +303,12 @@ def build_bot(cfg: Config) -> BashmakBot:
             bot.sessions[ctx.guild.id] = session
         except Exception:
             log.exception("не смог зайти в голосовой канал")
+            # Соединение могло уже подняться — без этого бот молча висел бы в
+            # канале без сессии, и выгнать его было бы нечем: /leave не знает
+            # о таком «призраке».
+            if voice_client is not None:
+                with contextlib.suppress(Exception):
+                    await voice_client.disconnect(force=True)
             await ctx.respond("Не получилось подключиться — посмотри логи.", ephemeral=True)
             return
 
@@ -273,6 +316,8 @@ def build_bot(cfg: Config) -> BashmakBot:
 
     @bot.slash_command(name="leave", description="Выгнать Башмака из голосового канала", guild_ids=guild_ids)
     async def leave(ctx: discord.ApplicationContext) -> None:
+        if await _reject_dm(ctx):
+            return
         session = bot.sessions.pop(ctx.guild.id, None)
         if session is None:
             await ctx.respond("Меня и так нигде нет.", ephemeral=True)
@@ -282,6 +327,8 @@ def build_bot(cfg: Config) -> BashmakBot:
 
     @bot.slash_command(name="status", description="Что сейчас происходит", guild_ids=guild_ids)
     async def status(ctx: discord.ApplicationContext) -> None:
+        if await _reject_dm(ctx):
+            return
         session = bot.sessions.get(ctx.guild.id)
         lines = [
             f"llama-server: {'готов' if await bot.llm.health() else 'НЕ ОТВЕЧАЕТ'}",
@@ -291,7 +338,8 @@ def build_bot(cfg: Config) -> BashmakBot:
             lines.append("в голосовом канале: нет")
         else:
             track = session.player.current
-            lines.append(f"канал: #{session.voice_client.channel.name}")
+            channel = session.voice_client.channel
+            lines.append(f"канал: #{getattr(channel, 'name', '?')}")
             lines.append(f"говорящих в обработке: {len(session.listener.registry.snapshot())}")
             if track is None:
                 lines.append("музыка: не играет")
@@ -304,6 +352,8 @@ def build_bot(cfg: Config) -> BashmakBot:
 
     @bot.slash_command(name="forget", description="Забыть историю разговора", guild_ids=guild_ids)
     async def forget(ctx: discord.ApplicationContext) -> None:
+        if await _reject_dm(ctx):
+            return
         session = bot.sessions.get(ctx.guild.id)
         if session is not None:
             bot.llm_queue.reset(session.channel_id)

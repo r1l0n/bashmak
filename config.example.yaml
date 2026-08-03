@@ -61,7 +61,7 @@ wakeword:
     - башмачок
     - бащмак
     - башмачек
-  # Порог rapidfuzz partial_ratio, 0..100.
+  # Порог rapidfuzz ratio (сравнение пословное), 0..100.
   threshold: 80
   # true = в LLM уходит только текст после имени, false = вся фраза.
   strip_prefix: true

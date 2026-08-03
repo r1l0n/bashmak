@@ -70,7 +70,15 @@ def test_prefix_kept_when_configured():
     wake = WakeWordFilter(FakeSection(variants=["башмак"], threshold=80, strip_prefix=False))
     match = wake.match("Башмак, что там по погоде?")
     assert match is not None
-    assert match.payload == "башмак что там по погоде"
+    assert match.payload == "Башмак, что там по погоде?"
+
+
+def test_payload_keeps_original_case_and_punctuation():
+    """Нормализация — только для сравнения: дальше по пайплайну уходит живой текст."""
+    wake = WakeWordFilter(FakeSection(variants=["башмак"], threshold=80, strip_prefix=True))
+    match = wake.match("Башмак, расскажи анекдот про кота!")
+    assert match is not None
+    assert match.payload == "расскажи анекдот про кота!"
 
 
 def test_normalize_strips_punctuation_and_yo():

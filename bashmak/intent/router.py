@@ -58,6 +58,20 @@ _RULES: tuple[tuple[Intent, re.Pattern[str]], ...] = (
 #: Явное упоминание музыки — по нему отличаем «включи музыку» от «включи мозг».
 _MUSIC_NOUN = re.compile(r"\b(музык\w*|трек\w*|песн\w*|плейлист\w*|альбом\w*|композици\w*)\b")
 
+#: Намерения, слова которых сплошь и рядом встречаются в обычной речи:
+#: «Башмак, продолжай» — это не resume, «а что дальше?» — не skip, «говори
+#: потише» — не громкость. Такие команды принимаем, только если музыка названа
+#: явно или уже играет.
+_NEEDS_MUSIC_CONTEXT = frozenset(
+    {
+        Intent.MUSIC_PAUSE,
+        Intent.MUSIC_RESUME,
+        Intent.MUSIC_SKIP,
+        Intent.MUSIC_LOUDER,
+        Intent.MUSIC_QUIETER,
+    }
+)
+
 #: Есть ли в реплике вообще что-то музыкальное — триггер для LLM-фоллбэка.
 _HINT = re.compile(
     r"\b(музык\w*|трек\w*|песн\w*|плейлист\w*|альбом\w*|фон\w*|звук\w*|громкост\w*"
@@ -99,8 +113,12 @@ def extract_query(text: str) -> str:
     return cleaned
 
 
-def classify_by_rules(text: str) -> Decision | None:
-    """Быстрый путь. None — правила не сработали."""
+def classify_by_rules(text: str, *, music_playing: bool = False) -> Decision | None:
+    """Быстрый путь. None — правила не сработали.
+
+    ``music_playing`` — играет ли сейчас что-нибудь. От этого зависит разбор
+    неоднозначных формулировок вроде «продолжай» или «дальше».
+    """
     lowered = text.lower().replace("ё", "е")
     for intent, pattern in _RULES:
         if pattern.search(lowered):
@@ -108,6 +126,12 @@ def classify_by_rules(text: str) -> Decision | None:
             if intent is Intent.MUSIC_PLAY and not query and not _MUSIC_NOUN.search(lowered):
                 # «включи» без объекта и без слова «музыка» — это не команда
                 # плееру, а начало обычной фразы. Пусть разбирается диалог.
+                continue
+            if (
+                intent in _NEEDS_MUSIC_CONTEXT
+                and not music_playing
+                and not _MUSIC_NOUN.search(lowered)
+            ):
                 continue
             return Decision(intent=intent, query=query, source="regex")
     return None
@@ -119,8 +143,8 @@ class IntentRouter:
         self.mode = str(section.get("llm_fallback", "hinted")) if section else "hinted"
         self.llm = llm
 
-    async def route(self, text: str) -> Decision:
-        decision = classify_by_rules(text)
+    async def route(self, text: str, *, music_playing: bool = False) -> Decision:
+        decision = classify_by_rules(text, music_playing=music_playing)
         if decision is not None:
             log.info("intent=%s (regex) query=%r", decision.intent.value, decision.query)
             return decision

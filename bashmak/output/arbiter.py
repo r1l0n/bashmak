@@ -25,7 +25,12 @@ from typing import AsyncIterator, Callable
 import discord
 import numpy as np
 
-from ..audio.resample import mono_to_discord_pcm
+from ..audio.resample import (
+    DISCORD_RATE,
+    StreamResampler,
+    float_mono_to_discord_pcm,
+    to_float_mono,
+)
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +38,10 @@ log = logging.getLogger(__name__)
 FRAME_SAMPLES = 960
 FRAME_BYTES = FRAME_SAMPLES * 2 * 2
 SILENCE = bytes(FRAME_BYTES)
+#: Сколько байт микса уходит в канал за секунду реального времени.
+BYTES_PER_SECOND = FRAME_BYTES * 50
+#: Запас к расчётной длительности реплики, прежде чем считать выход мёртвым.
+SPEAK_TIMEOUT_SLACK = 10.0
 
 
 class MixerSource(discord.AudioSource):
@@ -45,13 +54,18 @@ class MixerSource(discord.AudioSource):
         volume: float = 0.5,
         duck_volume: float = 0.25,
         fade_ms: int = 150,
-        on_music_end: Callable[[], None] | None = None,
+        on_music_end: Callable[[discord.AudioSource], None] | None = None,
     ) -> None:
         self._loop = loop
         self._on_music_end = on_music_end
 
         self.volume = float(volume)
         self.duck_volume = float(duck_volume)
+        # Даккинг относительный: «приглушить до четверти» должно означать
+        # четверть от ТЕКУЩЕЙ громкости, а не абсолютные 0.25. Иначе после
+        # пары команд «потише» музыка становилась бы громче, пока бот говорит.
+        base = self.volume if self.volume > 0 else 1.0
+        self._duck_ratio = min(1.0, max(0.0, self.duck_volume / base))
         # За сколько кадров доехать от полной громкости до приглушённой.
         frames = max(1, round(fade_ms / 20))
         self._fade_step = 1.0 / frames
@@ -67,19 +81,37 @@ class MixerSource(discord.AudioSource):
         self.drained = asyncio.Event()
         self.drained.set()
 
+    def _to_loop(self, callback: Callable[..., None], *args) -> None:
+        """Выполнить в лупе. На закрытом лупе (выключение) — на месте."""
+        try:
+            self._loop.call_soon_threadsafe(callback, *args)
+        except RuntimeError:
+            callback(*args)
+
     # ------------------------------------------------------------ речь ----
     def push_tts(self, pcm: bytes) -> None:
         """Добавить синтезированный кусок. Вызывается из лупа."""
         if not pcm:
             return
+        # clear() строго под тем же локом, что и extend: иначе поток плеера
+        # успевает между ними опустошить буфер и запланировать set(), который
+        # выполнится уже после clear() — и speak() отпустит реплику раньше
+        # времени, наложив следующую на недоигранную.
         with self._tts_lock:
             self._tts.extend(pcm)
-        self.drained.clear()
+            self.drained.clear()
 
     def clear_tts(self) -> None:
         with self._tts_lock:
             self._tts.clear()
-        self._loop.call_soon_threadsafe(self.drained.set)
+        self._to_loop(self._sync_drained)
+
+    def _sync_drained(self) -> None:
+        """Выставить событие, только если буфер и правда пуст. Только из лупа."""
+        with self._tts_lock:
+            empty = not self._tts
+        if empty:
+            self.drained.set()
 
     @property
     def speaking(self) -> bool:
@@ -92,10 +124,17 @@ class MixerSource(discord.AudioSource):
             old, self._music = self._music, source
             self._music_paused = False
         if old is not None:
-            try:
-                old.cleanup()
-            except Exception:
-                log.exception("не удалось закрыть предыдущий музыкальный источник")
+            # cleanup() у FFmpegPCMAudio — это kill() + communicate(), то есть
+            # блокирующая операция. Вызывать её прямо тут нельзя: set_music
+            # дёргается в том числе из потока плеера, у которого на кадр 20 мс.
+            self._to_loop(self._release, old)
+
+    @staticmethod
+    def _release(source: discord.AudioSource) -> None:
+        try:
+            source.cleanup()
+        except Exception:
+            log.exception("не удалось закрыть предыдущий музыкальный источник")
 
     def pause_music(self) -> None:
         with self._music_lock:
@@ -141,7 +180,9 @@ class MixerSource(discord.AudioSource):
         elif self._gain_ratio > target:
             self._gain_ratio = max(target, self._gain_ratio - self._fade_step)
 
-        music_gain = self.duck_volume + (self.volume - self.duck_volume) * self._gain_ratio
+        # Приглушение — доля от текущей громкости, а не абсолютная величина.
+        duck = self._duck_ratio
+        music_gain = self.volume * (duck + (1.0 - duck) * self._gain_ratio)
 
         if speech is None and music is None:
             return SILENCE
@@ -173,7 +214,7 @@ class MixerSource(discord.AudioSource):
             empty = not self._tts
 
         if empty:
-            self._loop.call_soon_threadsafe(self.drained.set)
+            self._to_loop(self._sync_drained)
         return frame
 
     def _take_music(self) -> bytes | None:
@@ -186,7 +227,10 @@ class MixerSource(discord.AudioSource):
         if not data:
             self.set_music(None)
             if self._on_music_end is not None:
-                self._loop.call_soon_threadsafe(self._on_music_end)
+                # Передаём сам источник: пока колбэк доедет до лупа, плеер уже
+                # мог запустить следующий трек, и «трек кончился» относилось бы
+                # не к тому источнику.
+                self._to_loop(self._on_music_end, source)
             return None
         if len(data) < FRAME_BYTES:
             data = data.ljust(FRAME_BYTES, b"\x00")
@@ -194,8 +238,7 @@ class MixerSource(discord.AudioSource):
 
     def cleanup(self) -> None:
         self.set_music(None)
-        with self._tts_lock:
-            self._tts.clear()
+        self.clear_tts()
 
 
 class OutputArbiter:
@@ -212,19 +255,49 @@ class OutputArbiter:
         # Бот говорит одним голосом: две реплики одновременно смешались бы в кашу.
         self._lock = asyncio.Lock()
 
-    def bind_music_end(self, callback: Callable[[], None]) -> None:
+    def bind_music_end(self, callback: Callable[[discord.AudioSource], None]) -> None:
         self.source._on_music_end = callback
 
     async def speak(self, chunks: AsyncIterator[tuple[bytes, int]]) -> None:
         """Проиграть поток кусков TTS и дождаться, пока всё прозвучит."""
         async with self._lock:
-            spoke = False
+            pushed = 0
+            # Один ресемплер на реплику: покадровый stateless-пересчёт даёт
+            # щелчки на стыках предложений.
+            resampler: StreamResampler | None = None
+
             async for pcm, rate in chunks:
-                mono = np.frombuffer(pcm, dtype="<i2")
-                self.source.push_tts(mono_to_discord_pcm(mono, rate))
-                spoke = True
-            if spoke:
-                await self.source.drained.wait()
+                if resampler is None or resampler.in_rate != rate:
+                    if resampler is not None:
+                        pushed += self._push(resampler.flush())
+                    resampler = StreamResampler(rate, DISCORD_RATE)
+                mono = to_float_mono(np.frombuffer(pcm, dtype="<i2"))
+                pushed += self._push(resampler.process(mono))
+
+            if resampler is not None:
+                pushed += self._push(resampler.flush())
+
+            if not pushed:
+                return
+
+            # Ждать событие без таймаута нельзя: его выставляет поток плеера, а
+            # он крутится, только пока живо голосовое соединение. Оборвалось —
+            # и вся очередь LLM встала бы намертво до рестарта процесса.
+            timeout = pushed / BYTES_PER_SECOND + SPEAK_TIMEOUT_SLACK
+            try:
+                await asyncio.wait_for(self.source.drained.wait(), timeout)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "речь не доиграла за %.0f с — голосовой выход не крутится, "
+                    "сбрасываю буфер",
+                    timeout,
+                )
+                self.source.clear_tts()
+
+    def _push(self, samples: np.ndarray) -> int:
+        data = float_mono_to_discord_pcm(samples)
+        self.source.push_tts(data)
+        return len(data)
 
     def interrupt(self) -> None:
         """Заткнуться немедленно (например, при выходе из канала)."""

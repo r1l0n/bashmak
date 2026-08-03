@@ -46,19 +46,41 @@ def clean_for_tts(text: str) -> str:
     return _SPACES.sub(" ", cleaned).strip()
 
 
+def _split_long(sentence: str, max_chars: int) -> list[str]:
+    """Дорезать предложение длиннее max_chars — по словам, а не по буквам.
+
+    Одно длинное предложение без точек иначе уехало бы в Piper целиком, и весь
+    смысл потокового синтеза («первое звучит, пока второе считается») пропал бы.
+    """
+    if len(sentence) <= max_chars:
+        return [sentence]
+
+    parts: list[str] = []
+    buffer = ""
+    for word in sentence.split(" "):
+        if buffer and len(buffer) + len(word) + 1 > max_chars:
+            parts.append(buffer)
+            buffer = word
+        else:
+            buffer = f"{buffer} {word}".strip()
+    if buffer:
+        parts.append(buffer)
+    return parts
+
+
 def split_sentences(text: str, max_chars: int = 220) -> list[str]:
     """Разбить на куски, удобные для потокового синтеза."""
     chunks: list[str] = []
     buffer = ""
     for sentence in _SENTENCE.split(text):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
-        if buffer and len(buffer) + len(sentence) + 1 > max_chars:
-            chunks.append(buffer)
-            buffer = sentence
-        else:
-            buffer = f"{buffer} {sentence}".strip()
+        for piece in _split_long(sentence.strip(), max_chars):
+            if not piece:
+                continue
+            if buffer and len(buffer) + len(piece) + 1 > max_chars:
+                chunks.append(buffer)
+                buffer = piece
+            else:
+                buffer = f"{buffer} {piece}".strip()
     if buffer:
         chunks.append(buffer)
     return chunks

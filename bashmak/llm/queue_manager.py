@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -23,6 +24,10 @@ from .client import LlmClient
 from .persona import Conversation
 
 log = logging.getLogger(__name__)
+
+#: Сколько каналов держать в памяти. История чистится при выходе из канала,
+#: но лимит страхует от утечки, если сессия закрылась не по-хорошему.
+MAX_CONVERSATIONS = 32
 
 
 @dataclass(order=True)
@@ -50,9 +55,9 @@ class LlmQueue:
         self._history_turns = int(cfg.get("history_turns", 12))
 
         self._queue: asyncio.PriorityQueue[ChatTask] = asyncio.PriorityQueue()
-        self._conversations: dict[int, Conversation] = {}
+        self._conversations: OrderedDict[int, Conversation] = OrderedDict()
         self._task: asyncio.Task | None = None
-        self.busy = False
+        self._deliveries: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------- жизнь --
     def start(self) -> None:
@@ -68,6 +73,13 @@ class LlmQueue:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+        pending = list(self._deliveries)
+        for delivery in pending:
+            delivery.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._deliveries.clear()
         log.info("очередь LLM остановлена")
 
     # ------------------------------------------------------------- API ----
@@ -80,11 +92,19 @@ class LlmQueue:
         if conversation is None:
             conversation = Conversation(self._history_turns)
             self._conversations[channel_id] = conversation
+            while len(self._conversations) > MAX_CONVERSATIONS:
+                dropped, _ = self._conversations.popitem(last=False)
+                log.debug("история канала %s вытеснена по лимиту", dropped)
+        self._conversations.move_to_end(channel_id)
         return conversation
 
     def note_user_line(self, channel_id: int, speaker: str, text: str) -> None:
-        """Запомнить реплику без обращения к боту — как контекст разговора."""
-        self.conversation(channel_id).add_user(speaker, text)
+        """Запомнить реплику без обращения к боту — как фон разговора.
+
+        Именно фон, а не полноценный ход диалога: иначе трое болтающих людей
+        за пару секунд вытеснили бы из окна истории и вопрос, и свой же ответ.
+        """
+        self.conversation(channel_id).note_ambient(speaker, text)
 
     def reset(self, channel_id: int) -> None:
         self._conversations.pop(channel_id, None)
@@ -94,7 +114,7 @@ class LlmQueue:
         return self._queue.qsize()
 
     # ------------------------------------------------------------ работа --
-    @guard("очередь LLM")
+    @guard("очередь LLM", reraise=False)
     async def _run(self) -> None:
         while True:
             task = await self._queue.get()
@@ -114,13 +134,9 @@ class LlmQueue:
         conversation = self.conversation(task.channel_id)
         messages = conversation.build_messages(task.speaker, task.text)
 
-        self.busy = True
-        try:
-            with stage(log, "llm", queue=self._queue.qsize()) as info:
-                reply = await self._client.complete(messages)
-                info["chars"] = len(reply)
-        finally:
-            self.busy = False
+        with stage(log, "llm", queue=self._queue.qsize()) as info:
+            reply = await self._client.complete(messages)
+            info["chars"] = len(reply)
 
         if not reply:
             log.warning("LLM вернула пустой ответ на %r", task.text)
@@ -130,4 +146,18 @@ class LlmQueue:
         conversation.add_assistant(reply)
         log.info("ответ: %r", reply)
 
-        await self._on_reply(task, reply)
+        # Озвучка идёт отдельным таском: ждать её здесь значило бы держать
+        # очередь простаивающей всё время проигрывания (ответ на 15 секунд —
+        # 15 секунд простоя), а stale_task_s тем временем выбрасывал бы уже
+        # распознанные реплики. Порядок реплик держит лок арбитра.
+        delivery = asyncio.create_task(self._deliver(task, reply), name="llm-reply")
+        self._deliveries.add(delivery)
+        delivery.add_done_callback(self._deliveries.discard)
+
+    async def _deliver(self, task: ChatTask, reply: str) -> None:
+        try:
+            await self._on_reply(task, reply)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("не смог доставить ответ: %r", reply)

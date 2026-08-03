@@ -32,6 +32,10 @@ class MusicPlayer:
         self._arbiter = arbiter
         self._queue: deque[Track] = deque()
         self._current: Track | None = None
+        # Источник текущего трека — «удостоверение личности» для _on_track_end:
+        # колбэк приезжает через луп и легко может относиться к треку, который
+        # мы уже сами сняли (см. skip).
+        self._source: discord.AudioSource | None = None
         self._max_queue = int(self._cfg.get("max_queue", 20))
         self._search_timeout = float(self._cfg.get("search_timeout_s", 20))
 
@@ -92,8 +96,7 @@ class MusicPlayer:
         skipped = self._current.title
         # set_music(None) не дёргает on_music_end, поэтому следующий трек
         # запускаем руками.
-        self._arbiter.source.set_music(None)
-        self._current = None
+        self._release()
         if not self._advance():
             return f"Пропустил {skipped}. Очередь пуста."
         return f"Пропустил. Дальше: {self._current.title}"
@@ -102,8 +105,7 @@ class MusicPlayer:
         if self._current is None and not self._queue:
             return "И так тихо."
         self._queue.clear()
-        self._arbiter.source.set_music(None)
-        self._current = None
+        self._release()
         return "Выключил музыку."
 
     def louder(self) -> str:
@@ -116,10 +118,15 @@ class MusicPlayer:
 
     def shutdown(self) -> None:
         self._queue.clear()
-        self._current = None
-        self._arbiter.source.set_music(None)
+        self._release()
 
     # ---------------------------------------------------------- внутрь ----
+    def _release(self) -> None:
+        """Снять текущий трек, не запуская следующий."""
+        self._current = None
+        self._source = None
+        self._arbiter.source.set_music(None)
+
     def _start(self, track: Track) -> None:
         source = discord.FFmpegPCMAudio(
             track.stream_url,
@@ -127,6 +134,7 @@ class MusicPlayer:
             options=_FFMPEG_OPTIONS,
         )
         self._current = track
+        self._source = source
         self._arbiter.source.set_music(source)
         log.info("играет: %s", track.title)
 
@@ -136,10 +144,18 @@ class MusicPlayer:
         self._start(self._queue.popleft())
         return True
 
-    def _on_track_end(self) -> None:
+    def _on_track_end(self, source: discord.AudioSource) -> None:
         """Вызывается микшером (через луп), когда ffmpeg закончил трек."""
+        if source is not self._source:
+            # Трек кончился ровно в тот момент, когда его и так сняли (skip,
+            # stop). Без этой проверки мы бы промотали ещё один трек и
+            # рассинхронизировали _current с тем, что реально звучит.
+            log.debug("трек закончился, но его уже сняли — колбэк устарел")
+            return
+
         finished = self._current.title if self._current else "?"
         self._current = None
+        self._source = None
         log.info("трек закончился: %s", finished)
         try:
             self._advance()

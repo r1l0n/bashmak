@@ -5,9 +5,13 @@
 регулярно слышит «башмака», «бошмак», «башмачок» — точное сравнение тут
 бесполезно, а rapidfuzz ловит все склонения и типичные ошибки распознавания.
 
-Сравнение пословное, а не по всей строке: ``partial_ratio`` по длинной фразе
-даёт ложные срабатывания на любом похожем куске, а нам нужно именно
-обращение.
+Сравнение пословное, а не по всей строке: ``fuzz.ratio`` по длинной фразе
+не сработал бы вовсе, а ``partial_ratio`` дал бы ложные срабатывания на любом
+похожем куске — нам нужно именно обращение.
+
+Нормализация — только для сравнения. Наружу уходит исходный текст с вырезанным
+именем: LLM и поиск музыки должны получить «Расскажи анекдот про кота!», а не
+«расскажи анекдот про кота».
 """
 
 from __future__ import annotations
@@ -22,6 +26,10 @@ log = logging.getLogger(__name__)
 
 _PUNCT = re.compile(r"[^\w\s-]+", re.UNICODE)
 _SPACES = re.compile(r"\s+")
+#: Слово в исходном тексте — по нему ищем имя, не теряя позиций в строке.
+_WORD = re.compile(r"[\w-]+", re.UNICODE)
+#: Что срезать с краёв запроса после вырезания имени.
+_EDGE = " \t\n\r,.!?:;-—–…\"'«»"
 
 
 def normalize(text: str) -> str:
@@ -47,31 +55,35 @@ class WakeWordFilter:
 
     def match(self, text: str) -> WakeMatch | None:
         """None — обращения нет, реплику дальше по пайплайну не пускаем."""
-        normalized = normalize(text)
-        if not normalized:
+        if not text or not text.strip():
             return None
 
-        words = normalized.split(" ")
-        best_index = -1
+        # Ищем по исходной строке, сравниваем по нормализованным словам: так
+        # известны позиции, и запрос можно вырезать как есть, без потери
+        # регистра и пунктуации.
+        best: re.Match[str] | None = None
         best_score = 0.0
 
-        for index, word in enumerate(words):
+        for found in _WORD.finditer(text):
+            word = normalize(found.group(0))
             # Длина отсекает мусор до вызова fuzz: «а», «ну», «да» имени не ровня.
             if len(word) < 4:
                 continue
             score = max(fuzz.ratio(word, variant) for variant in self.variants)
             if score > best_score:
-                best_score, best_index = score, index
+                best_score, best = score, found
 
-        if best_index < 0 or best_score < self.threshold:
+        if best is None or best_score < self.threshold:
             return None
 
         if self.strip_prefix:
-            payload = " ".join(words[best_index + 1 :]).strip()
+            # Слева срезаем пунктуацию («Башмак, привет» → «привет»), справа
+            # только пробелы: «!» и «?» в конце запроса — часть фразы.
+            payload = text[best.end() :].lstrip(_EDGE).rstrip()
             # «Башмак!» без продолжения — тоже обращение, пусть отзовётся.
             if not payload:
-                payload = " ".join(words[:best_index]).strip()
+                payload = text[: best.start()].strip(_EDGE)
         else:
-            payload = normalized
+            payload = text.strip()
 
-        return WakeMatch(payload=payload, score=best_score, word=words[best_index])
+        return WakeMatch(payload=_SPACES.sub(" ", payload), score=best_score, word=best.group(0))

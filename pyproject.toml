@@ -1,0 +1,8 @@
+# Минимальный проектный файл: пакет никуда не публикуется, нужен ради того,
+# чтобы голый `pytest` из корня находил пакет `bashmak` (без него работал
+# только `python -m pytest`, который добавляет CWD в sys.path сам).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

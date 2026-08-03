@@ -14,12 +14,10 @@ from bashmak.intent.router import Intent, classify_by_rules, extract_query
         ("поставь что-нибудь из наутилуса", Intent.MUSIC_PLAY),
         ("выключи музыку", Intent.MUSIC_STOP),
         ("останови музыку", Intent.MUSIC_STOP),
-        ("поставь на паузу", Intent.MUSIC_PAUSE),
-        ("продолжай", Intent.MUSIC_RESUME),
+        ("поставь музыку на паузу", Intent.MUSIC_PAUSE),
         ("следующий трек", Intent.MUSIC_SKIP),
-        ("давай дальше", Intent.MUSIC_SKIP),
-        ("сделай погромче", Intent.MUSIC_LOUDER),
-        ("потише пожалуйста", Intent.MUSIC_QUIETER),
+        ("сделай музыку погромче", Intent.MUSIC_LOUDER),
+        ("сделай песню потише", Intent.MUSIC_QUIETER),
     ],
 )
 def test_rules_catch_music_commands(text, intent):
@@ -27,6 +25,38 @@ def test_rules_catch_music_commands(text, intent):
     assert decision is not None, f"правила не поймали {text!r}"
     assert decision.intent is intent
     assert decision.source == "regex"
+
+
+@pytest.mark.parametrize(
+    "text, intent",
+    [
+        ("поставь на паузу", Intent.MUSIC_PAUSE),
+        ("продолжай", Intent.MUSIC_RESUME),
+        ("давай дальше", Intent.MUSIC_SKIP),
+        ("сделай погромче", Intent.MUSIC_LOUDER),
+        ("потише пожалуйста", Intent.MUSIC_QUIETER),
+    ],
+)
+def test_ambiguous_commands_need_playing_music(text, intent):
+    """Без слова «музыка» это команды, только пока что-то играет."""
+    decision = classify_by_rules(text, music_playing=True)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is intent
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Всё это обычная речь, а не команды плееру.
+        "продолжай",
+        "а что там дальше",
+        "говори потише",
+        "давай погромче рассказывай",
+        "сделай паузу в рассказе",
+    ],
+)
+def test_ambiguous_words_are_chat_when_nothing_plays(text):
+    assert classify_by_rules(text, music_playing=False) is None
 
 
 @pytest.mark.parametrize(

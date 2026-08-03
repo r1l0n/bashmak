@@ -29,6 +29,7 @@ class UserStream:
         self._lock = threading.Lock()
         self._chunks: deque[np.ndarray] = deque()
         self._samples = 0
+        self._rate = max(1, int(rate))
         self._max_samples = int(max_seconds * rate)
         self._dropped = 0
 
@@ -62,7 +63,7 @@ class UserStream:
             log.warning(
                 "user=%s: потребитель не успевает, выброшено %.1f с аудио",
                 self.user_id,
-                dropped / 16000,
+                dropped / self._rate,
             )
         return np.concatenate(chunks)
 
