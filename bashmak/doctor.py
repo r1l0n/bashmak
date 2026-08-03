@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes.util
+import os
 import shutil
 import sys
 import time
@@ -165,18 +166,74 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
     return f"{audio.size / 16000:.1f} с → {transcript.text.strip()!r}"
 
 
+TOKEN_URL = "https://discord.com/api/v10/users/@me"
+
+
 async def _check_token(token: str) -> str:
     import httpx
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        response = await client.get(
-            "https://discord.com/api/v10/users/@me",
-            headers={"Authorization": f"Bot {token}"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(TOKEN_URL, headers={"Authorization": f"Bot {token}"})
+    except httpx.TransportError as exc:
+        return await _check_token_via_tunnel(token, exc)
+
     if response.status_code == 401:
         raise RuntimeError("Discord не принял токен (401)")
     response.raise_for_status()
     return f"бот {response.json().get('username')}"
+
+
+async def _check_token_via_tunnel(token: str, direct_error: Exception) -> str:
+    """Повторить проверку через локальный SOCKS туннеля.
+
+    Прямой путь тут обязан падать, если Discord закрыт по IP: маркировка
+    трафика привязана к cgroup bashmak.service, а doctor запускается из
+    шелла — то есть заведомо вне туннеля. Без этого фоллбэка проверка
+    показывала бы FAIL даже когда у бота всё в порядке.
+
+    Через curl, а не httpx, чтобы не тащить socksio в зависимости ради
+    одной диагностической проверки. Токен уходит в stdin, а не в argv —
+    иначе он был бы виден в ps.
+    """
+    kind = type(direct_error).__name__
+    if shutil.which("curl") is None:
+        raise RuntimeError(f"напрямую {kind}, а curl для проверки через туннель не найден")
+
+    proxy = os.environ.get("BASHMAK_SOCKS", "127.0.0.1:10808")
+    options = "\n".join(
+        [
+            "silent",
+            "show-error",
+            f'socks5-hostname = "{proxy}"',
+            "max-time = 15",
+            'output = "/dev/null"',
+            'write-out = "%{http_code}"',
+            f'header = "Authorization: Bot {token}"',
+            f'url = "{TOKEN_URL}"',
+            "",
+        ]
+    )
+
+    process = await asyncio.create_subprocess_exec(
+        "curl",
+        "--config",
+        "-",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await process.communicate(options.encode())
+    code = stdout.decode(errors="replace").strip()
+
+    if code == "200":
+        return f"ок через туннель (socks {proxy}); напрямую — {kind}, это ожидаемо"
+    if code == "401":
+        raise RuntimeError("Discord не принял токен (401)")
+    raise RuntimeError(
+        f"напрямую {kind}, через туннель code={code or '—'} "
+        f"{stderr.decode(errors='replace').strip()}".strip()
+    )
 
 
 async def run(offline: bool) -> int:
