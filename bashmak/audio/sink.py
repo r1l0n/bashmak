@@ -74,9 +74,8 @@ class BashmakSink(Sink):
         self.registry = registry
         self._resamplers: dict[int, StreamResampler] = {}
         self._warned: set[int] = set()
-        # Роутер лезет за client.guild ещё до init() — пусть атрибут будет.
-        if getattr(self, "client", None) is None:
-            self.client = None
+        # client трогать не надо: в 2.8 это property только на чтение,
+        # присваивание падает с AttributeError. Роутер читает его сам.
 
     def walk_children(self) -> Iterator[Sink]:
         """Синк один, вложенных нет. Роутер обходит дерево — отдаём пустое."""
