@@ -137,12 +137,16 @@ sudo systemctl enable --now sing-box && ip -brief addr show tun-bashmak
 curl -sS --socks5-hostname 127.0.0.1:10808 --max-time 15 -o /dev/null -w 'code=%{http_code}\n' https://discord.com/api/v10/gateway
 ```
 
-4. В `/etc/systemd/system/bashmak.service` раскомментировать четыре строки
-   про `sing-box.service` и `deploy/tunnel.sh`, затем:
+4. Перегенерировать юнит с включённой маркировкой трафика:
 
 ```bash
-sudo systemctl daemon-reload && sudo systemctl restart bashmak
+./scripts/setup.sh --tunnel
 ```
+
+   Юниты собираются из `deploy/*.template` в момент установки, так что после
+   любой правки шаблона (или обновления репозитория) `--systemd`/`--tunnel`
+   надо прогнать заново — иначе в `/etc/systemd/system` останется копия
+   времён прошлой установки.
 
 [deploy/tunnel.sh](deploy/tunnel.sh) маркирует трафик по cgroup юнита —
 не по пользователю. Поэтому не нужно заводить отдельного пользователя и

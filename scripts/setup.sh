@@ -11,7 +11,12 @@
 #   ./scripts/setup.sh --skip-models        # только окружение
 #   ./scripts/setup.sh --models-only        # только докачать модели
 #   ./scripts/setup.sh --systemd            # + установить и включить юниты
+#   ./scripts/setup.sh --tunnel             # + пустить трафик бота через sing-box
 #   ./scripts/setup.sh --force              # перекачать/пересобрать всё
+#
+# Юниты генерируются из deploy/*.template при установке. Если шаблон поменялся
+# в репозитории, перезапустите с --systemd, иначе в /etc/systemd/system
+# останется копия времён прошлой установки.
 #
 set -euo pipefail
 
@@ -37,6 +42,7 @@ PROFILE=balanced
 DO_MODELS=1
 DO_ENV=1
 DO_SYSTEMD=0
+DO_TUNNEL=0
 FORCE=0
 
 while [ $# -gt 0 ]; do
@@ -46,8 +52,9 @@ while [ $# -gt 0 ]; do
         --skip-models) DO_MODELS=0; shift ;;
         --models-only) DO_ENV=0; shift ;;
         --systemd)     DO_SYSTEMD=1; shift ;;
+        --tunnel)      DO_TUNNEL=1; DO_SYSTEMD=1; shift ;;
         --force)       FORCE=1; shift ;;
-        -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,25p' "$0"; exit 0 ;;
         *)             die "неизвестный флаг: $1 (см. --help)" ;;
     esac
 done
@@ -431,11 +438,29 @@ setup_systemd() {
         return
     fi
 
+    if [ "$DO_TUNNEL" -eq 1 ] && [ ! -x /usr/local/bin/sing-box ]; then
+        warn "запрошен --tunnel, но sing-box не установлен."
+        warn "  сначала: sudo ./scripts/install_singbox.sh"
+    fi
+
     local user unit
     user="$(id -un)"
     for unit in llama-server bashmak; do
         sed -e "s|@@ROOT@@|$ROOT|g" -e "s|@@USER@@|$user|g" \
             "deploy/$unit.service.template" > "/tmp/$unit.service"
+
+        # В шаблоне строки туннеля закомментированы: он нужен только там,
+        # где Discord режется по IP. --tunnel их раскомментирует.
+        if [ "$unit" = bashmak ] && [ "$DO_TUNNEL" -eq 1 ]; then
+            sed -i \
+                -e 's|^#Requires=sing-box|Requires=sing-box|' \
+                -e 's|^#After=sing-box|After=sing-box|' \
+                -e 's|^#ExecStartPre=+|ExecStartPre=+|' \
+                -e 's|^#ExecStopPost=+|ExecStopPost=+|' \
+                "/tmp/$unit.service"
+            ok "bashmak.service: трафик пойдёт через sing-box"
+        fi
+
         $SUDO install -m 0644 "/tmp/$unit.service" "/etc/systemd/system/$unit.service"
         rm -f "/tmp/$unit.service"
         ok "/etc/systemd/system/$unit.service"
