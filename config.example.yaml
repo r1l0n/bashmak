@@ -75,9 +75,13 @@ intent:
 
 llm:
   server_url: http://127.0.0.1:8080
-  model_path: models/llm/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-  # Потоки llama-server. 6 физических ядер: 4 сюда, 2 остаются STT/TTS.
-  threads: 4
+  # GigaChat-20B-A3B: MoE, ~3 млрд активных весов из 20. Файл 11.6 ГБ, и все
+  # 11.6 держатся в памяти — считается-то малая часть, но лежать должна вся.
+  model_path: models/llm/GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf
+  # Потоки llama-server. 8 физических ядер: 6 сюда, 2 остаются STT/TTS.
+  threads: 6
+  # Модель умеет 131k, но нам столько не нужно: истории нет, в промпт уходит
+  # системная часть и одна реплика. Лишний контекст — только лишняя память.
   context_size: 4096
   max_tokens: 200
   temperature: 0.7
@@ -88,13 +92,17 @@ llm:
   stale_task_s: 45
 
 tts:
-  # Мужской. Альтернативы: ru_RU-ruslan-medium, ru_RU-denis-medium.
-  voice_path: models/tts/ru_RU-dmitri-medium.onnx
+  # Silero TTS v4, русский. Ударения и «ё» — звучит заметно живее Piper.
+  model_path: models/tts/v4_ru.pt
+  # Мужские: aidar, eugene. Женские: baya, kseniya, xenia.
+  speaker: aidar
+  # 48000 совпадает с частотой Discord — пересэмплирование на выходе не нужно.
+  sample_rate: 48000
+  put_accent: true
+  put_yo: true
   workers: 1
-  # >1 — медленнее речь, <1 — быстрее. Мужской голос звучит бодрее чуть быстрее.
-  length_scale: 0.95
-  noise_scale: 0.667
-  noise_w: 0.8
+  # Потоки torch в каждом воркере. Остальные ядра нужны STT и llama-server.
+  threads: 2
 
 music:
   volume: 0.5

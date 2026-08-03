@@ -87,7 +87,7 @@ def _check_imports() -> str:
         "onnxruntime",
         "soxr",
         "numpy",
-        "piper",
+        "torch",
         "yt_dlp",
         "rapidfuzz",
         "httpx",
@@ -147,19 +147,19 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
 
     from .audio.vad import WINDOW_SAMPLES_16K, Segment, SileroVad
     from .stt.whisper_worker import SttPool
-    from .tts.piper_worker import TtsPool
+    from .tts.silero_worker import TtsPool
 
     phrase = "Башмак на связи, проверка звука."
     tts = TtsPool(cfg.tts)
     stt = SttPool(cfg.stt)
     try:
         pieces: list[np.ndarray] = []
-        rate = 22050
+        rate = 48000
         async for pcm, chunk_rate in tts.stream(phrase):
             pieces.append(np.frombuffer(pcm, dtype="<i2"))
             rate = chunk_rate
         if not pieces:
-            raise RuntimeError("Piper не выдал ни одного сэмпла")
+            raise RuntimeError("синтезатор не выдал ни одного сэмпла")
 
         mono = np.concatenate(pieces).astype(np.float32) / 32768.0
         audio = soxr.resample(mono, rate, 16000).astype(np.float32)
@@ -285,7 +285,7 @@ async def run(offline: bool) -> int:
     report.check("VAD", lambda: _check_file(cfg.vad.path("model_path"), "silero"))
     report.check("LLM", lambda: _check_file(cfg.llm.path("model_path"), "gguf"))
     report.check("STT", lambda: _check_file(cfg.stt.path("model_path"), "faster-whisper"))
-    report.check("TTS", lambda: _check_file(cfg.tts.path("voice_path"), "piper"))
+    report.check("TTS", lambda: _check_file(cfg.tts.path("model_path"), "silero-tts"))
     report.check("llama-server", lambda: _check_llama_binary(cfg.root))
 
     print("\n рантайм")

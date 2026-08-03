@@ -34,8 +34,14 @@ faster-whisper>=1.1
 # а нам нужен только сам .onnx (2 МБ) — его качает setup.sh.
 onnxruntime>=1.17
 
-# TTS (piper1-gpl, преемник rhasspy/piper)
-piper-tts>=1.3
+# TTS — Silero v4 (модель это torch.package: код и веса в одном .pt).
+#
+# Индекс не декорация: колесо torch с PyPI тащит CUDA-рантайм на ~2.5 ГБ,
+# бесполезный на сервере без видеокарты. Сборки с этого индекса помечены
+# «+cpu», а локальная версия у pip старше «голой» — значит, и при --upgrade
+# он останется на CPU-колесе, а не переползёт обратно на CUDA.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2
 
 # аудио
 numpy>=1.26,<3

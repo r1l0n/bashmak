@@ -59,32 +59,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# Диалоговая модель одна на все профили: GigaChat-20B-A3B — MoE, из 20 млрд
+# весов на каждый токен считаются ~3 млрд. По скорости это уровень трёх-
+# миллиардной модели, по качеству — куда выше, а русский у неё родной, а не
+# переведённый. Профиль теперь выбирает только STT.
+LLM_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
+LLM_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
+
 case "$PROFILE" in
-    fast)
-        LLM_REPO="bartowski/Qwen2.5-3B-Instruct-GGUF"
-        LLM_FILE="Qwen2.5-3B-Instruct-Q4_K_M.gguf"
-        LLM_REPO_ALT="Qwen/Qwen2.5-3B-Instruct-GGUF"
-        STT_REPO="Systran/faster-whisper-small"
-        ;;
-    balanced)
-        LLM_REPO="bartowski/Qwen2.5-7B-Instruct-GGUF"
-        LLM_FILE="Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-        LLM_REPO_ALT="Qwen/Qwen2.5-7B-Instruct-GGUF"
-        STT_REPO="Systran/faster-whisper-small"
-        ;;
-    quality)
-        LLM_REPO="bartowski/Qwen2.5-7B-Instruct-GGUF"
-        LLM_FILE="Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-        LLM_REPO_ALT="Qwen/Qwen2.5-7B-Instruct-GGUF"
-        STT_REPO="Systran/faster-whisper-medium"
-        ;;
+    fast|balanced) STT_REPO="Systran/faster-whisper-small" ;;
+    quality)       STT_REPO="Systran/faster-whisper-medium" ;;
     *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality)" ;;
 esac
 
 STT_DIR="models/stt/$(basename "$STT_REPO")"
-# Мужской голос. Из четырёх русских у Piper (denis, dmitri, irina, ruslan)
-# dmitri самый чистый; все они medium — «high» для русского не выпускали.
-TTS_VOICE="ru_RU-dmitri-medium"
+TTS_MODEL="models/tts/v4_ru.pt"
+TTS_URL="https://models.silero.ai/models/tts/ru/v4_ru.pt"
 VAD_URL="https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
 VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
@@ -127,8 +117,8 @@ check_host() {
 
     local avail
     avail="$(df -P -BG "$ROOT" | awk 'NR==2 {gsub(/G/,"",$4); print $4}')"
-    if [ -n "$avail" ] && [ "$avail" -lt 20 ]; then
-        die "мало места: ${avail} ГБ свободно, нужно минимум 20 ГБ (модели ~7 ГБ + сборки)"
+    if [ -n "$avail" ] && [ "$avail" -lt 25 ]; then
+        die "мало места: ${avail} ГБ свободно, нужно минимум 25 ГБ (модели ~13 ГБ + сборки)"
     fi
     ok "свободно ${avail:-?} ГБ"
 }
@@ -223,7 +213,7 @@ setup_venv() {
             ok "снят py-cord (конфликтует с discord.py за пакет discord)"
         fi
 
-        ok "ставлю зависимости (это надолго — ctranslate2/onnxruntime тяжёлые)"
+        ok "ставлю зависимости (это надолго — torch, ctranslate2 и onnxruntime тяжёлые)"
         "$PY" -m pip install --upgrade -r requirements.txt
         echo "$now" > "$stamp"
         ok "зависимости установлены"
@@ -247,7 +237,7 @@ build_llama_from_source() {
         git clone --depth 1 https://github.com/ggml-org/llama.cpp "$src"
     fi
     cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DGGML_NATIVE=ON -DLLAMA_CURL=OFF
-    cmake --build "$src/build" --target llama-server llama-gguf-split -j "$(nproc)"
+    cmake --build "$src/build" --target llama-server -j "$(nproc)"
     mkdir -p "$LLAMA_DIR"
     cp -r "$src/build/bin/." "$LLAMA_DIR/"
 }
@@ -329,39 +319,10 @@ fetch_llm() {
         return
     fi
     mkdir -p models/llm
-    ok "качаю LLM $LLM_REPO / $LLM_FILE"
-    if ! hf_get_file "$LLM_REPO" "$LLM_FILE" "models/llm" >/dev/null; then
-        # Официальный репозиторий Qwen раздаёт Q4_K_M шардами (-00001-of-0000N.gguf).
-        # Современный llama.cpp грузит их по первому шарду, но склеим явно —
-        # чтобы конфиг указывал на один предсказуемый файл.
-        warn "не вышло с $LLM_REPO, пробую $LLM_REPO_ALT (шардированный)"
-        local first
-        first="$("$PY" - "$LLM_REPO_ALT" "models/llm" <<'PY'
-import sys, glob, os
-from huggingface_hub import snapshot_download
-repo, dest = sys.argv[1:3]
-snapshot_download(repo_id=repo, local_dir=dest, allow_patterns=["*q4_k_m*.gguf", "*Q4_K_M*.gguf"])
-shards = sorted(glob.glob(os.path.join(dest, "*[qQ]4_[kK]_[mM]*.gguf")))
-print(shards[0] if shards else "")
-PY
-)"
-        [ -n "$first" ] || die "не удалось скачать GGUF ни из $LLM_REPO, ни из $LLM_REPO_ALT"
-        case "$first" in
-            *-00001-of-*)
-                local split_bin
-                split_bin="$(find "$LLAMA_DIR" -type f -name llama-gguf-split | head -1)"
-                if [ -n "$split_bin" ]; then
-                    LD_LIBRARY_PATH="$(dirname "$split_bin"):$(dirname "$split_bin")/../lib:${LD_LIBRARY_PATH:-}" \
-                        "$split_bin" --merge "$first" "$target"
-                    ok "шарды склеены в $target"
-                else
-                    warn "llama-gguf-split не найден — оставляю шарды, укажите в config.yaml: $first"
-                    target="$first"
-                fi
-                ;;
-            *) mv -f "$first" "$target" ;;
-        esac
-    fi
+    ok "качаю LLM $LLM_REPO / $LLM_FILE (12 ГБ, это надолго)"
+    hf_get_file "$LLM_REPO" "$LLM_FILE" "models/llm" >/dev/null \
+        || die "не удалось скачать $LLM_FILE из $LLM_REPO"
+    [ -s "$target" ] || die "GGUF не скачался: $target"
     ok "LLM: $target ($(du -h "$target" 2>/dev/null | cut -f1))"
 }
 
@@ -377,15 +338,15 @@ fetch_stt() {
 }
 
 fetch_tts() {
-    if [ "$FORCE" -eq 0 ] && [ -s "models/tts/$TTS_VOICE.onnx" ]; then
-        skip "голос Piper уже на месте"
+    if [ "$FORCE" -eq 0 ] && [ -s "$TTS_MODEL" ]; then
+        skip "модель Silero TTS уже на месте"
         return
     fi
     mkdir -p models/tts
-    ok "качаю голос Piper $TTS_VOICE"
-    "$PY" -m piper.download_voices "$TTS_VOICE" --data-dir models/tts
-    [ -s "models/tts/$TTS_VOICE.onnx" ] || die "голос $TTS_VOICE не скачался"
-    ok "TTS: models/tts/$TTS_VOICE.onnx"
+    ok "качаю Silero TTS v4 ru (60 МБ)"
+    curl -fsSL -o "$TTS_MODEL" "$TTS_URL"
+    [ -s "$TTS_MODEL" ] || die "модель Silero TTS не скачалась"
+    ok "TTS: $TTS_MODEL"
 }
 
 fetch_vad() {
@@ -421,7 +382,7 @@ setup_config() {
             -e "s|^profile: .*|profile: $PROFILE|" \
             -e "s|^  model_path: models/llm/.*|  model_path: models/llm/$LLM_FILE|" \
             -e "s|^  model_path: models/stt/.*|  model_path: $STT_DIR|" \
-            -e "s|^  voice_path: models/tts/.*|  voice_path: models/tts/$TTS_VOICE.onnx|" \
+            -e "s|^  model_path: models/tts/.*|  model_path: $TTS_MODEL|" \
             config.yaml
         ok "config.yaml создан из шаблона"
     fi

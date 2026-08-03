@@ -1,14 +1,20 @@
-"""TTS: Piper в пуле процессов.
+"""TTS: Silero v4 (ru) в пуле процессов.
 
-Синтез блокирующий и заметно грузит CPU, поэтому он вынесен из лупа — иначе
-бот переставал бы принимать голос, пока говорит сам.
+Пришёл на смену Piper: у Piper для русского все голоса «medium» и звучат
+роботом, Silero ставит ударения и произносит «ё» — на слух разница больше,
+чем между любыми двумя голосами Piper. Цена — torch в зависимостях и
+загрузка модели в каждый процесс-воркер (workers: 1 по умолчанию не просто
+так).
+
+Синтез блокирующий и грузит CPU, поэтому он вынесен из лупа — иначе бот
+переставал бы принимать голос, пока говорит сам.
 
 Длинный ответ режется на предложения и отдаётся наружу по кускам: первое
 предложение начинает звучать, пока синтезируется второе. На CPU это разница
 между «отвечает сразу» и «думает три секунды и выдаёт всё разом».
 
-Ответ модели перед синтезом чистится: Piper озвучивает звёздочки, решётки и
-эмодзи буквально.
+Ответ модели перед синтезом чистится: разметку и эмодзи синтезатор
+озвучивает буквально.
 """
 
 from __future__ import annotations
@@ -24,8 +30,8 @@ from ..utils.logging import stage
 
 log = logging.getLogger(__name__)
 
-_VOICE = None
-_SYNTH_KWARGS: dict[str, float] = {}
+_MODEL = None
+_PARAMS: dict = {}
 
 # Разметка, ссылки и эмодзи — всё, что нельзя произносить.
 _MARKDOWN = re.compile(r"[*_`#>~|\[\]]+")
@@ -36,6 +42,9 @@ _EMOJI = re.compile(
 )
 _SENTENCE = re.compile(r"(?<=[.!?…])\s+")
 _SPACES = re.compile(r"\s+")
+#: Кусок без единой буквы или цифры Silero произнести не может и падает
+#: с «No text left after cleaning» — такие пропускаем.
+_SPEAKABLE = re.compile(r"[^\W_]", flags=re.UNICODE)
 
 
 def clean_for_tts(text: str) -> str:
@@ -49,7 +58,7 @@ def clean_for_tts(text: str) -> str:
 def _split_long(sentence: str, max_chars: int) -> list[str]:
     """Дорезать предложение длиннее max_chars — по словам, а не по буквам.
 
-    Одно длинное предложение без точек иначе уехало бы в Piper целиком, и весь
+    Одно длинное предложение без точек иначе уехало бы в синтез целиком, и весь
     смысл потокового синтеза («первое звучит, пока второе считается») пропал бы.
     """
     if len(sentence) <= max_chars:
@@ -86,84 +95,65 @@ def split_sentences(text: str, max_chars: int = 220) -> list[str]:
     return chunks
 
 
-def _init_worker(voice_path: str, params: dict[str, float]) -> None:
-    global _VOICE, _SYNTH_KWARGS
-    from piper import PiperVoice
+def _init_worker(model_path: str, params: dict) -> None:
+    global _MODEL, _PARAMS
+    import torch
 
-    _VOICE = PiperVoice.load(voice_path)
-    _SYNTH_KWARGS = params
-
-
-def _synthesis_config(params: dict[str, float]):
-    """Собрать SynthesisConfig, оставив только поля, которые знает эта версия Piper.
-
-    Между piper 1.2 (rhasspy) и piper1-gpl 1.4 поля переименовывались
-    (noise_w → noise_w_scale), а окружение на сервере обновляется отдельно от
-    кода — проще подстроиться, чем пинить версию намертво.
-    """
-    try:
-        from dataclasses import fields
-
-        from piper import SynthesisConfig
-    except ImportError:
-        return None
-
-    allowed = {f.name for f in fields(SynthesisConfig)}
-    aliases = {"noise_w": "noise_w_scale"}
-    kwargs = {}
-    for key, value in params.items():
-        name = key if key in allowed else aliases.get(key, key)
-        if name in allowed:
-            kwargs[name] = value
-    return SynthesisConfig(**kwargs)
+    # Без этого torch забирает все ядра и дерётся за них с Whisper и llama.
+    torch.set_num_threads(int(params.get("threads", 2)))
+    # Модель — torch.package, а не обычный state_dict: внутри архива лежит и
+    # код, и веса, поэтому грузится importer'ом, а не torch.load.
+    _MODEL = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
+    _MODEL.to(torch.device("cpu"))
+    _PARAMS = params
+    # Первый вызов у torch секунды на прогрев (аллокаторы, ядра). Пусть их
+    # съест старт бота, а не первый ответ живому человеку.
+    _synthesize("раз")
 
 
 def _synthesize(text: str) -> tuple[bytes, int]:
     """Выполняется в процессе-воркере. Возвращает (моно int16 PCM, частота)."""
-    if _VOICE is None:  # pragma: no cover
-        raise RuntimeError("голос Piper не инициализирован в воркере")
+    if _MODEL is None:  # pragma: no cover
+        raise RuntimeError("модель Silero не инициализирована в воркере")
 
-    parts: list[bytes] = []
-    sample_rate = getattr(getattr(_VOICE, "config", None), "sample_rate", 22050)
+    import numpy as np
 
-    synthesize = getattr(_VOICE, "synthesize", None)
-    if synthesize is not None:
-        config = _synthesis_config(_SYNTH_KWARGS)
-        stream = synthesize(text, config) if config is not None else synthesize(text)
-        for chunk in stream:
-            audio = getattr(chunk, "audio_int16_bytes", None)
-            if audio is None:  # старый API отдавал сырые байты
-                parts.append(bytes(chunk))
-            else:
-                parts.append(audio)
-                sample_rate = getattr(chunk, "sample_rate", sample_rate)
-    else:  # piper < 1.3
-        parts.extend(_VOICE.synthesize_stream_raw(text, **_SYNTH_KWARGS))
-
-    return b"".join(parts), sample_rate
+    rate = int(_PARAMS.get("sample_rate", 48000))
+    audio = _MODEL.apply_tts(
+        text=text,
+        speaker=_PARAMS.get("speaker", "aidar"),
+        sample_rate=rate,
+        put_accent=bool(_PARAMS.get("put_accent", True)),
+        put_yo=bool(_PARAMS.get("put_yo", True)),
+    )
+    samples = np.asarray(audio.numpy(), dtype=np.float32)
+    pcm = np.clip(samples * 32767.0, -32768, 32767).astype("<i2")
+    return pcm.tobytes(), rate
 
 
 class TtsPool:
     def __init__(self, cfg) -> None:  # noqa: ANN001 — bashmak.config.Section
-        voice_path = cfg.path("voice_path")
-        if not voice_path.exists():
+        model_path = cfg.path("model_path")
+        if not model_path.exists():
             raise FileNotFoundError(
-                f"нет голоса Piper: {voice_path}. Запустите ./scripts/setup.sh"
+                f"нет модели Silero: {model_path}. Запустите ./scripts/setup.sh"
             )
 
         params = {
-            "length_scale": float(cfg.get("length_scale", 1.0)),
-            "noise_scale": float(cfg.get("noise_scale", 0.667)),
-            "noise_w": float(cfg.get("noise_w", 0.8)),
+            "speaker": str(cfg.get("speaker", "aidar")),
+            "sample_rate": int(cfg.get("sample_rate", 48000)),
+            "put_accent": bool(cfg.get("put_accent", True)),
+            "put_yo": bool(cfg.get("put_yo", True)),
+            "threads": int(cfg.get("threads", 2)),
         }
         workers = int(cfg.get("workers", 1))
         self._pool = ProcessPoolExecutor(
             max_workers=workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_worker,
-            initargs=(str(voice_path), params),
+            initargs=(str(model_path), params),
         )
-        log.info("TTS: %s, воркеров %d", voice_path.name, workers)
+        log.info("TTS: %s, голос %s, воркеров %d", model_path.name, params["speaker"], workers)
 
     async def stream(self, text: str) -> AsyncIterator[tuple[bytes, int]]:
         """Синтезировать текст кусками: (моно int16 PCM, частота)."""
@@ -173,6 +163,8 @@ class TtsPool:
 
         loop = asyncio.get_running_loop()
         for index, chunk in enumerate(split_sentences(cleaned)):
+            if not _SPEAKABLE.search(chunk):
+                continue
             with stage(log, f"tts[{index}]", chars=len(chunk)):
                 pcm, rate = await loop.run_in_executor(self._pool, _synthesize, chunk)
             if pcm:

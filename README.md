@@ -2,7 +2,7 @@
 
 Голосовой бот для Discord. Слушает нескольких участников одновременно,
 отзывается на своё имя, разговаривает и включает музыку. Всё локально, всё на
-CPU: llama.cpp + faster-whisper + Piper + Silero VAD.
+CPU: llama.cpp + faster-whisper + Silero TTS + Silero VAD.
 
 Техническое задание — [bashmak_project_plan.md](bashmak_project_plan.md).
 
@@ -25,7 +25,7 @@ bash scripts/setup.sh --systemd
 
 Скрипт делает всё сам: системные пакеты (`ffmpeg`, `libopus`, сборочные
 инструменты), venv с зависимостями, готовые бинарники llama.cpp и загрузку
-всех весов — LLM, STT, TTS, VAD. Занимает 10–30 минут и около 10 ГБ диска,
+всех весов — LLM, STT, TTS, VAD. Занимает 15–40 минут и около 15 ГБ диска,
 в основном на модель.
 
 Дальше — токен бота:
@@ -47,7 +47,7 @@ URL Generator** выдайте боту scope `bot` + `applications.commands` и
 ```
 
 Скрипт печатает таблицу PASS/FAIL: пакеты, файлы моделей, ответ
-`llama-server`, сквозной круг Piper→Whisper и валидность токена. Если всё
+`llama-server`, сквозной круг TTS→Whisper и валидность токена. Если всё
 зелёное — запускаем:
 
 ```bash
@@ -62,7 +62,7 @@ journalctl -u bashmak -f
 
 | Флаг | Зачем |
 |---|---|
-| `--profile fast\|balanced\|quality` | Какие модели качать (по умолчанию `balanced` — Qwen2.5-7B + whisper small) |
+| `--profile fast\|balanced\|quality` | Какой STT качать (по умолчанию `balanced` — whisper small) |
 | `--skip-models` | Только окружение, без весов |
 | `--models-only` | Только докачать веса в готовое окружение |
 | `--systemd` | Установить и включить юниты |
@@ -74,9 +74,9 @@ journalctl -u bashmak -f
 
 | Профиль | LLM | STT | Когда |
 |---|---|---|---|
-| `fast` | Qwen2.5-3B Q4_K_M | whisper small | Важна скорость, участников много |
-| `balanced` | Qwen2.5-7B Q4_K_M | whisper small | По умолчанию |
-| `quality` | Qwen2.5-7B Q4_K_M | whisper medium | Качество важнее задержки |
+| `fast` | GigaChat-20B-A3B Q4_K_M | whisper small | Важна скорость, участников много |
+| `balanced` | GigaChat-20B-A3B Q4_K_M | whisper small | По умолчанию |
+| `quality` | GigaChat-20B-A3B Q4_K_M | whisper medium | Качество важнее задержки |
 
 Профиль влияет и на то, что скачается, и на пути в `config.yaml`. Сменить
 после установки: `./scripts/setup.sh --profile quality --models-only`, затем
@@ -192,7 +192,7 @@ sudo ./deploy/tunnel.sh status
 Команды: `/start`, `/leave`, `/status`.
 
 Истории диалога нет: каждый вопрос уходит в модель отдельно, с чистым
-контекстом. На 7B/CPU накопленный контекст разбавлял вопрос, и модель
+контекстом. На CPU накопленный контекст разбавлял вопрос, и модель
 отвечала на фон, а не на то, что спросили.
 
 Пока бот отвечает, музыка автоматически приглушается и возвращается к прежней
@@ -216,7 +216,7 @@ Discord voice (по SSRC, раздельно на каждого)
                          музыка                     диалог
                          (быстрый путь)      очередь к LLM (по одному)
                               │                       │
-                              │                     Piper TTS
+                              │                     Silero TTS
                               └────────┬──────────────┘
                                  Output Arbiter
                              (микс: речь + приглушённая музыка)
@@ -240,7 +240,7 @@ Discord voice (по SSRC, раздельно на каждого)
 | [wakeword/filter.py](bashmak/wakeword/filter.py) | Нечёткий поиск имени в тексте |
 | [intent/router.py](bashmak/intent/router.py) | Регекс + LLM-фоллбэк: болтовня или команда |
 | [llm/queue_manager.py](bashmak/llm/queue_manager.py) | Очередь к llama-server, один запрос за раз |
-| [tts/piper_worker.py](bashmak/tts/piper_worker.py) | Piper в пуле процессов, синтез по предложениям |
+| [tts/silero_worker.py](bashmak/tts/silero_worker.py) | Silero TTS в пуле процессов, синтез по предложениям |
 | [music/player.py](bashmak/music/player.py) | Очередь треков поверх микшера |
 | [output/arbiter.py](bashmak/output/arbiter.py) | Единственный голосовой выход, даккинг музыки |
 
@@ -251,8 +251,11 @@ Discord voice (по SSRC, раздельно на каждого)
 Всё в [config.yaml](config.example.yaml) — пороги VAD, размеры моделей, число
 потоков, промпт-персона в [llm/persona.py](bashmak/llm/persona.py).
 
-Бюджет ядер по умолчанию рассчитан на 6 физических: `llm.threads: 4`,
-`stt.workers: 2` по 2 потока, VAD и остальное — на основном лупе. Если бот
+Бюджет ядер по умолчанию рассчитан на 8 физических: `llm.threads: 6`,
+`stt.workers: 2` по 2 потока, `tts.threads: 2`, VAD и остальное — на основном
+лупе. Суммарно это больше восьми, и так и задумано: этапы одной реплики идут
+по очереди (распознали → ответили → озвучили), одновременно все три пула не
+работают. Если бот
 тормозит при трёх и более говорящих, снижайте `llm.threads`, а не
 `stt.workers`: распознавание должно успевать, иначе речь начнёт теряться в
 буферах.
@@ -266,7 +269,7 @@ Discord voice (по SSRC, раздельно на каждого)
 12:31:04 INFO [u4711@812.3] ...whisper_worker: stt: 640 мс (user=4711, sec=2.1, chars=34)
 12:31:04 INFO [u4711@812.3] ...bot: обращение от Вася (score=100): 'расскажи анекдот'
 12:31:06 INFO [u4711@812.3] ...queue_manager: llm: 2140 мс (queue=0, chars=118)
-12:31:07 INFO [u4711@812.3] ...piper_worker: tts[0]: 310 мс (chars=61)
+12:31:07 INFO [u4711@812.3] ...silero_worker: tts[0]: 310 мс (chars=61)
 ```
 
 Логи: `journalctl -u bashmak -f` и `logs/bashmak.log` (с ротацией).

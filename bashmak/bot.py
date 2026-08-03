@@ -33,7 +33,7 @@ from .music import search as music_search
 from .music.player import MusicPlayer
 from .output.arbiter import OutputArbiter
 from .stt.whisper_worker import SttPool, Transcript
-from .tts.piper_worker import TtsPool
+from .tts.silero_worker import TtsPool
 from .utils.logging import current_cid, guard, setup_logging, stage
 from .wakeword.filter import WakeWordFilter
 

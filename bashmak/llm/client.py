@@ -48,7 +48,7 @@ class LlmClient:
         return response.status_code == 200
 
     async def wait_until_ready(self, timeout: float = 300.0, interval: float = 3.0) -> bool:
-        """Модель на 7B грузится с диска минуты — бот должен её дождаться, а не упасть."""
+        """Модель в 12 ГБ грузится с диска минуты — бот должен её дождаться, а не упасть."""
         deadline = asyncio.get_running_loop().time() + timeout
         announced = False
         while asyncio.get_running_loop().time() < deadline:
@@ -60,6 +60,19 @@ class LlmClient:
             await asyncio.sleep(interval)
         return False
 
+    @staticmethod
+    def _check_roles(messages: list[dict[str, str]]) -> None:
+        """Шаблон GigaChat требует строгого чередования user/assistant.
+
+        Нарушение он ловит сам — но уже на сервере, отдавая 500 с жалобой из
+        Jinja, и в логе бота остаётся только «llama-server не ответил».
+        Здесь же видно, кто именно собрал такой список.
+        """
+        roles = [m["role"] for m in messages if m["role"] != "system"]
+        expected = ["user" if i % 2 == 0 else "assistant" for i in range(len(roles))]
+        if roles != expected:
+            raise LlmError(f"роли должны идти user/assistant по очереди, а пришло: {roles}")
+
     async def complete(
         self,
         messages: list[dict[str, str]],
@@ -69,6 +82,7 @@ class LlmClient:
         json_schema: dict[str, Any] | None = None,
         retries: int = 1,
     ) -> str:
+        self._check_roles(messages)
         payload: dict[str, Any] = {
             "messages": messages,
             "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
