@@ -112,16 +112,29 @@ ClientHello внутри уже установленного соединени�
    REALITY**, flow `xtls-rprx-vision`. Именно TCP+Vision: XHTTP и прочие
    маскирующиеся транспорты добавляют джиттер, а голос чувствителен к
    разбросу задержки сильнее, чем к её величине.
-2. На сервере поставить sing-box и положить конфиг:
+2. На сервере поставить sing-box. Через `apt` с `deb.sagernet.org` в
+   заблокированной сети обычно не выходит — репозиторий на AWS и отваливается
+   по таймауту так же, как Discord. Ставим бинарником с GitHub:
 
 ```bash
-sudo cp deploy/sing-box.json.example /etc/sing-box/config.json && sudo nano /etc/sing-box/config.json
+sudo ./scripts/install_singbox.sh
 ```
 
-3. Поднять тоннель и убедиться, что интерфейс появился:
+3. Вписать свои значения (адрес VPS, uuid, public_key), проверить и поднять:
+
+```bash
+sudo nano /etc/sing-box/config.json && sudo sing-box check -c /etc/sing-box/config.json
+```
 
 ```bash
 sudo systemctl enable --now sing-box && ip -brief addr show tun-bashmak
+```
+
+   Проверить канал до VPS отдельно от маршрутизации — в конфиге для этого
+   есть SOCKS-инбаунд. Здесь должно быть `code=200`:
+
+```bash
+curl -sS --socks5-hostname 127.0.0.1:10808 --max-time 15 -o /dev/null -w 'code=%{http_code}\n' https://discord.com/api/v10/gateway
 ```
 
 4. В `/etc/systemd/system/bashmak.service` раскомментировать четыре строки
