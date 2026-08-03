@@ -59,6 +59,10 @@ class GuildSession:
         # Один источник на всё время в канале: микшер сам разруливает,
         # что сейчас звучит — музыка, речь или их смесь.
         self.voice_client.play(self.arbiter.source)
+        # start_recording() в py-cord 2.8.1 больше не зовёт Sink.init(vc), а
+        # декодер пакетов начинается с assert sink.client и ищет автора кадра
+        # в vc._ssrc_to_id. Без этой строки приём падает на первом же пакете.
+        self.listener.sink.init(self.voice_client)
         self.voice_client.start_recording(self.listener.sink, self._on_recording_stop)
         self.listener.start()
         log.info(
@@ -83,8 +87,18 @@ class GuildSession:
         self.bot.llm_queue.reset(self.channel_id)
         log.info("сессия в %s закрыта", self.guild.name)
 
-    async def _on_recording_stop(self, sink, *args) -> None:  # noqa: ANN001 — сигнатура py-cord
-        log.debug("запись остановлена")
+    def _on_recording_stop(self, error=None, *args) -> None:  # noqa: ANN001 — сигнатура py-cord
+        """Колбэк ``after`` для start_recording.
+
+        Синхронный намеренно: в 2.8.1 ``AudioReader._stop()`` зовёт его прямо
+        из своего потока (``self.after(self.error)``), не через луп. Корутина
+        здесь просто не была бы выполнена — «coroutine was never awaited».
+        Первым аргументом приходит исключение, уронившее приём, или None.
+        """
+        if error is None:
+            log.debug("запись остановлена")
+        else:
+            log.error("приём голоса остановлен с ошибкой: %r", error)
 
     # ------------------------------------------------------------ речь ----
     def speaker_name(self, user_id: int) -> str:

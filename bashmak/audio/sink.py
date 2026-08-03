@@ -10,12 +10,23 @@ append в дек. VAD, STT и прочее живут в asyncio-лупе (см.
 Про совместимость с py-cord 2.8.x
 ---------------------------------
 В 2.8 приёмный стек переехал в ``discord/voice/receive/`` и обзавёлся
-событийным роутером. Роутер обращается к синку за ``__sink_listeners__``,
-``walk_children()`` и ``client``, но на самом ``discord.sinks.Sink`` эти
-атрибуты не определены — падает даже штатный ``WaveSink``. Поэтому мы
-объявляем их сами: звук по-прежнему приходит в ``write()``
-(``router.py``: ``self.sink.write(data, data.source)``), а события нам не
-нужны, так что список слушателей пустой.
+событийным роутером, но на старый ``discord.sinks.Sink`` его не перевели:
+новый код требует от синка ``__sink_listeners__``, ``walk_children()`` и
+``is_opus()``, а на базовом классе их нет — падает даже штатный
+``WaveSink``. Поэтому мы объявляем их сами:
+
+* ``__sink_listeners__`` пустой — звук приходит в ``write()``
+  (``router.py``: ``self.sink.write(data, data.source)``), а события
+  (speaking start/stop, rtcp) нам не нужны;
+* ``walk_children()`` пустой — вложенных синков у нас нет;
+* ``is_opus()`` → ``False``, чтобы ``PacketDecoder`` сам раскодировал Opus
+  и клал в ``VoiceData.pcm`` обычный PCM 48 кГц / 2 канала / s16le.
+
+Второе, чего 2.8.1 не делает сама: ``start_recording()`` больше не зовёт
+``Sink.init(vc)``, а ``PacketDecoder._process_packet`` начинается с
+``assert self.sink.client`` и лезет в ``client._ssrc_to_id`` за автором
+пакета. Без ``vc`` приём падает на первом же кадре — поэтому его
+проставляют явно (см. ``GuildSession.start()`` в ``bashmak/bot.py``).
 
 Ниже 2.8 идти нельзя, даже ради старого API: Discord рвёт голосовое
 соединение с кодом 4017 — версии до 2.8 говорят на протоколе, который
@@ -38,9 +49,10 @@ log = logging.getLogger(__name__)
 def _extract_pcm(data) -> bytes | None:  # noqa: ANN001 — тип зависит от версии py-cord
     """Достать сырой PCM.
 
-    До 2.8 в ``write()`` приходили байты, в 2.8 — объект пакета с полем
-    ``source``. Поддерживаем оба, чтобы обновление библиотеки не роняло приём
-    молча: тут поток чужой, и исключение отсюда глушит голос всем сразу.
+    До 2.8 в ``write()`` приходили байты, в 2.8 — ``VoiceData`` с полями
+    ``pcm``, ``source`` и ``packet``. Поддерживаем оба, чтобы обновление
+    библиотеки не роняло приём молча: тут поток чужой, и исключение отсюда
+    глушит голос всем сразу.
     """
     if isinstance(data, (bytes, bytearray, memoryview)):
         return bytes(data)
@@ -80,6 +92,10 @@ class BashmakSink(Sink):
     def walk_children(self) -> Iterator[Sink]:
         """Синк один, вложенных нет. Роутер обходит дерево — отдаём пустое."""
         return iter(())
+
+    def is_opus(self) -> bool:
+        """Нет: пусть PacketDecoder декодирует Opus, нам нужен готовый PCM."""
+        return False
 
     # py-cord зовёт это на каждые 20 мс речи каждого участника.
     def write(self, data, user=None) -> None:  # noqa: ANN001 — сигнатура задана py-cord
