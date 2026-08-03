@@ -136,11 +136,16 @@ async def _check_llm(client) -> str:  # noqa: ANN001 — LlmClient
 
 
 async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
-    """Piper синтезирует фразу, Whisper читает её обратно — сквозная проверка."""
+    """Piper синтезирует фразу, VAD признаёт её речью, Whisper читает обратно.
+
+    VAD здесь не для красоты: он молчит не падая. Сломанный VAD выглядит как
+    полностью рабочий бот, который просто никогда никого не слышит — и найти
+    это можно только прогнав через него заведомую речь.
+    """
     import numpy as np
     import soxr
 
-    from .audio.vad import Segment
+    from .audio.vad import WINDOW_SAMPLES_16K, Segment, SileroVad
     from .stt.whisper_worker import SttPool
     from .tts.piper_worker import TtsPool
 
@@ -159,6 +164,21 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
         mono = np.concatenate(pieces).astype(np.float32) / 32768.0
         audio = soxr.resample(mono, rate, 16000).astype(np.float32)
 
+        window = int(cfg.vad.get("window_samples", WINDOW_SAMPLES_16K))
+        threshold = float(cfg.vad.get("threshold", 0.5))
+        vad = SileroVad(cfg.vad.path("model_path"), 16000)
+        best = max(
+            (
+                vad.speech_probability(audio[i : i + window])
+                for i in range(0, audio.size - window, window)
+            ),
+            default=0.0,
+        )
+        if best < threshold:
+            raise RuntimeError(
+                f"VAD не признал синтезированную речь речью: {best:.2f} < порога {threshold:.2f}"
+            )
+
         segment = Segment(user_id=0, audio=audio, duration=audio.size / 16000, ended_at=0.0)
         transcript = await stt.transcribe(segment)
     finally:
@@ -167,7 +187,7 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
 
     if transcript is None or not transcript.text.strip():
         raise RuntimeError("Whisper не расслышал синтезированную фразу")
-    return f"{audio.size / 16000:.1f} с → {transcript.text.strip()!r}"
+    return f"{audio.size / 16000:.1f} с → VAD {best:.2f} → {transcript.text.strip()!r}"
 
 
 TOKEN_URL = "https://discord.com/api/v10/users/@me"

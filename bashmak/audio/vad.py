@@ -22,6 +22,13 @@ log = logging.getLogger(__name__)
 
 #: Silero v5 принимает строго 512 сэмплов на окно при 16 кГц (32 мс).
 WINDOW_SAMPLES_16K = 512
+#: ...но на вход ONNX идёт 576: перед окном дописываются 64 сэмпла предыдущего.
+#:
+#: Этого нет в сигнатуре модели (``input`` объявлен как ``[None, None]``), и
+#: без контекста она не падает, а молча отдаёт ~0.001 на что угодно — на речь,
+#: на шум, на тишину. В штатной обёртке silero эти сэмплы дописывает Python,
+#: а мы гоняем ONNX напрямую, поэтому носим контекст сами.
+CONTEXT_SAMPLES_16K = 64
 
 
 @dataclass(slots=True)
@@ -66,10 +73,13 @@ class SileroVad:
         self._v5 = "state" in names
         if not self._v5 and not {"h", "c"} <= names:
             raise RuntimeError(f"незнакомая сигнатура модели VAD: {sorted(names)}")
+        # Контекст нужен только v5; v4 брала окно целиком.
+        self._context_samples = (CONTEXT_SAMPLES_16K if sample_rate == 16000 else 32) if self._v5 else 0
         self.reset()
 
     def reset(self) -> None:
         """Сбросить состояние — обязательно между фразами."""
+        self._context = np.zeros(self._context_samples, dtype=np.float32)
         if self._v5:
             self._state = np.zeros((2, 1, 128), dtype=np.float32)
         else:
@@ -77,14 +87,16 @@ class SileroVad:
             self._c = np.zeros((2, 1, 64), dtype=np.float32)
 
     def speech_probability(self, window: np.ndarray) -> float:
-        x = np.ascontiguousarray(window, dtype=np.float32).reshape(1, -1)
+        window = np.ascontiguousarray(window, dtype=np.float32)
+        x = np.concatenate((self._context, window)) if self._context_samples else window
         if self._v5:
             out, self._state = self.session.run(
-                None, {"input": x, "state": self._state, "sr": self._sr}
+                None, {"input": x.reshape(1, -1), "state": self._state, "sr": self._sr}
             )
+            self._context = window[-self._context_samples :]
         else:
             out, self._h, self._c = self.session.run(
-                None, {"input": x, "h": self._h, "c": self._c, "sr": self._sr}
+                None, {"input": x.reshape(1, -1), "h": self._h, "c": self._c, "sr": self._sr}
             )
         return float(out[0][0])
 
