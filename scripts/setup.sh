@@ -457,6 +457,7 @@ setup_systemd() {
                 -e 's|^#After=sing-box|After=sing-box|' \
                 -e 's|^#ExecStartPre=+|ExecStartPre=+|' \
                 -e 's|^#ExecStopPost=+|ExecStopPost=+|' \
+                -e 's|^#BindReadOnlyPaths=|BindReadOnlyPaths=|' \
                 "/tmp/$unit.service"
             ok "bashmak.service: трафик пойдёт через sing-box"
         fi

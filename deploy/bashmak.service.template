@@ -19,6 +19,10 @@ EnvironmentFile=@@ROOT@@/.env
 # моменту уже создан, и правилу есть за что зацепиться.
 #ExecStartPre=+@@ROOT@@/deploy/tunnel.sh up
 #ExecStopPost=+@@ROOT@@/deploy/tunnel.sh down
+# Свой резолвер вместо системного — видим только этому сервису.
+# Без него DNS бота зависит от systemd-resolved и от того, как
+# промаркирован трафик до 127.0.0.53.
+#BindReadOnlyPaths=@@ROOT@@/deploy/resolv.conf:/etc/resolv.conf
 ExecStart=@@ROOT@@/.venv/bin/python -m bashmak.bot
 Restart=always
 RestartSec=10

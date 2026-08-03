@@ -68,10 +68,10 @@ up() {
     iptables -t mangle -A "$CHAIN" -d 10.0.0.0/8     -j RETURN
     iptables -t mangle -A "$CHAIN" -d 172.16.0.0/12  -j RETURN
     iptables -t mangle -A "$CHAIN" -d 192.168.0.0/16 -j RETURN
-    # DNS оставляем прямым: резолвер отдаёт честные адреса, а гнать его в
-    # тоннель значит добавить туда ещё одну точку отказа.
-    iptables -t mangle -A "$CHAIN" -p udp --dport 53 -j RETURN
-    iptables -t mangle -A "$CHAIN" -p tcp --dport 53 -j RETURN
+    # DNS НЕ исключаем: у сервиса свой resolv.conf с 1.1.1.1 (см.
+    # deploy/resolv.conf и BindReadOnlyPaths в юните), и эти запросы должны
+    # идти той же дорогой, что и всё остальное. Исключение сломало бы схему:
+    # имена резолвились бы мимо туннеля, а то и вовсе никем.
     iptables -t mangle -A "$CHAIN" -j MARK --set-mark "$MARK"
 
     iptables -t mangle -C OUTPUT -m cgroup --path "$CGROUP" -j "$CHAIN" 2>/dev/null \
