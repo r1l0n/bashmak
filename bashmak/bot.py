@@ -280,8 +280,8 @@ def build_bot(cfg: Config) -> BashmakBot:
     bot = BashmakBot(cfg)
     guild_ids = list(cfg.discord.get("guild_ids", []) or []) or None
 
-    @bot.slash_command(name="join", description="Позвать Башмака в свой голосовой канал", guild_ids=guild_ids)
-    async def join(ctx: discord.ApplicationContext) -> None:
+    @bot.slash_command(name="start", description="Позвать Башмака в свой голосовой канал", guild_ids=guild_ids)
+    async def start(ctx: discord.ApplicationContext) -> None:
         if await _reject_dm(ctx):
             return
 
