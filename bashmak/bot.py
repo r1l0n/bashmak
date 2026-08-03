@@ -186,6 +186,12 @@ class BashmakBot(discord.Client):
         super().__init__(intents=intents)
         self.cfg = cfg
         self.tree = app_commands.CommandTree(self)
+        # Без этих двух «Ошибка взаимодействия» в Discord не оставляет в логе
+        # ничего: interaction_check показывает, что команда до нас дошла,
+        # on_error — что она упала (иначе исключение уходит в логгер
+        # discord.app_commands, а он у нас прижат вместе со всем discord.*).
+        self.tree.interaction_check = self._log_command
+        self.tree.on_error = self._on_command_error
 
         self.stt = SttPool(cfg.stt)
         self.tts = TtsPool(cfg.tts)
@@ -197,6 +203,27 @@ class BashmakBot(discord.Client):
         self.sessions: dict[int, GuildSession] = {}
         self._idle_task: asyncio.Task | None = None
 
+    # ---------------------------------------------------------- команды ----
+    @staticmethod
+    async def _log_command(interaction: discord.Interaction) -> bool:
+        """Отметить, что команда до нас дошла. Ничего не проверяет, всегда True."""
+        name = interaction.command.name if interaction.command else "?"
+        log.info("команда /%s от %s", name, interaction.user)
+        return True
+
+    async def _on_command_error(
+        self, interaction: discord.Interaction, error: Exception
+    ) -> None:
+        """Показать упавшую команду в логе и человеку, а не молча."""
+        name = interaction.command.name if interaction.command else "?"
+        log.error("команда /%s упала", name, exc_info=error)
+        with contextlib.suppress(Exception):
+            answer = "Команда упала — посмотри логи."
+            if interaction.response.is_done():
+                await interaction.followup.send(answer, ephemeral=True)
+            else:
+                await interaction.response.send_message(answer, ephemeral=True)
+
     # ------------------------------------------------------- жизненный цикл
     async def setup_hook(self) -> None:
         """Зарегистрировать slash-команды.
@@ -207,7 +234,13 @@ class BashmakBot(discord.Client):
         guild_ids = [int(g) for g in (self.cfg.discord.get("guild_ids") or [])]
         if not guild_ids:
             await self.tree.sync()
-            log.info("команды зарегистрированы глобально (появятся в течение часа)")
+            log.warning(
+                "guild_ids пуст — команды зарегистрированы глобально. Discord "
+                "раскатывает их не мгновенно и держит на них общий лимит, а "
+                "клиент до обновления может слать вызовы по устаревшему id — "
+                "и тогда «Ошибка взаимодействия» не доедет до бота вовсе. "
+                "Для отладки укажите id сервера в config.yaml (discord.guild_ids)."
+            )
             return
 
         for guild_id in guild_ids:
@@ -322,14 +355,15 @@ def build_bot(cfg: Config) -> BashmakBot:
             await interaction.response.send_message("Сначала зайди в голосовой канал.", ephemeral=True)
             return
 
+        # Строго до закрытия старой сессии и подключения: и то и другое дольше
+        # трёх секунд, которые Discord даёт на ответ, а просроченный ответ —
+        # это «Ошибка взаимодействия» у пользователя и NotFound у нас.
+        # После defer() отвечать можно только через followup.
+        await interaction.response.defer(ephemeral=True)
+
         existing = bot.sessions.pop(interaction.guild.id, None)
         if existing is not None:
             await existing.close()
-
-        # Дальше идёт подключение к голосу — это дольше трёх секунд, которые
-        # Discord даёт на ответ. После defer() отвечать можно только через
-        # followup.
-        await interaction.response.defer(ephemeral=True)
         voice_client: voice_recv.VoiceRecvClient | None = None
         try:
             voice_client = await voice.channel.connect(cls=voice_recv.VoiceRecvClient)
