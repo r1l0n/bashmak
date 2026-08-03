@@ -160,6 +160,20 @@ curl -sS --socks5-hostname 127.0.0.1:10808 --max-time 15 -o /dev/null -w 'code=%
 sudo ./deploy/tunnel.sh status
 ```
 
+> **Если после поднятия туннеля на машине умер DNS** (`git`, `apt`, всё
+> подряд пишут «Could not resolve host») — sing-box зарегистрировал себя в
+> systemd-resolved как резолвер для линка `tun-bashmak` с доменом `~.`,
+> то есть перехватил запросы всего хоста, а не только бота.
+> `tunnel.sh up` это снимает, но перехват возвращается при каждом
+> перезапуске самого sing-box. Разово лечится так:
+>
+> ```bash
+> sudo resolvectl revert tun-bashmak
+> ```
+>
+> Увидеть, вернулся ли перехват, можно в `tunnel.sh status` — строка про
+> DNS на туннеле должна быть пустой.
+
 После этого `./scripts/doctor.sh` должен показать `DISCORD_TOKEN` зелёным —
 именно эта проверка первой упирается в блокировку.
 

@@ -48,6 +48,18 @@ wait_for_interface() {
 up() {
     wait_for_interface
 
+    # sing-box при создании TUN регистрирует себя в systemd-resolved как DNS
+    # для этого линка, причём с доменом «~.» — то есть перехватывает ВСЕ
+    # запросы хоста, а не только бота. В нашей схеме это ровно наоборот тому,
+    # что нужно: туннель предназначен одному сервису, а хост должен
+    # продолжать резолвить через свой обычный апстрим. Без этой строки
+    # ломается DNS на всей машине, включая apt и git.
+    if command -v resolvectl >/dev/null 2>&1; then
+        if resolvectl revert "$TUN_IF" >/dev/null 2>&1; then
+            log "перехват DNS на $TUN_IF снят"
+        fi
+    fi
+
     # Ответные пакеты приходят с tun, а обратный маршрут до тех же адресов в
     # основной таблице идёт через eth0 — при строгой проверке (rp_filter=1)
     # ядро их выбросит. Нужен loose-режим. Действует max(all, интерфейс),
@@ -96,6 +108,10 @@ status() {
     echo "правило:";   ip rule list | grep "fwmark ${MARK}" || echo "  нет"
     echo "таблица ${TABLE}:"; ip route show table "$TABLE" 2>/dev/null || echo "  пуста"
     echo "iptables:";  iptables -t mangle -S | grep -E "BASHMAK|cgroup" || echo "  нет"
+    # «DNS Domain: ~.» здесь означает, что sing-box снова перехватил резолвинг
+    # всего хоста — тогда перестанет работать DNS вообще везде.
+    echo "DNS на туннеле (должно быть пусто):"
+    resolvectl status "$TUN_IF" 2>/dev/null | grep -E "DNS Servers|DNS Domain" || echo "  чисто"
 }
 
 case "${1:-}" in
