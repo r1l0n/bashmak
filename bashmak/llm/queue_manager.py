@@ -23,7 +23,7 @@ from typing import Awaitable, Callable
 
 from ..utils.logging import current_cid, guard, stage
 from .client import LlmClient
-from .persona import build_messages
+from .persona import build_messages, clean_reply
 
 log = logging.getLogger(__name__)
 
@@ -106,9 +106,14 @@ class LlmQueue:
 
     async def _handle(self, task: ChatTask) -> None:
         with stage(log, "llm", queue=self._queue.qsize()) as info:
-            reply = await self._client.complete(build_messages(task.speaker, task.text))
-            info["chars"] = len(reply)
+            raw = await self._client.complete(build_messages(task.speaker, task.text))
+            info["chars"] = len(raw)
 
+        reply = clean_reply(raw)
+        if reply != raw:
+            # Не мелочь: значит, модель пошла дописывать диалог за собеседника,
+            # и в голосовой канал уехала бы выдуманная беседа целиком.
+            log.warning("в ответе была чужая разметка, обрезал: %r", raw)
         if not reply:
             log.warning("LLM вернула пустой ответ на %r", task.text)
             return

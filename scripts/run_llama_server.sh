@@ -46,17 +46,24 @@ BIN="$(find "$ROOT/vendor" -type f -name llama-server -perm -u+x 2>/dev/null | h
 BINDIR="$(dirname "$BIN")"
 export LD_LIBRARY_PATH="$BINDIR:$BINDIR/../lib:${LD_LIBRARY_PATH:-}"
 
+TEMPLATE="$ROOT/deploy/gigachat.jinja"
+[ -f "$TEMPLATE" ] || { echo "нет шаблона чата: $TEMPLATE" >&2; exit 1; }
+
 echo "llama-server: $BIN"
 echo "  модель:  $MODEL"
 echo "  потоки:  $THREADS, контекст: $CTX"
+echo "  шаблон:  $TEMPLATE"
 echo "  адрес:   http://$HOST:$PORT"
 
 # Флаги намеренно только самые стабильные: сборка llama.cpp обновляется
 # скриптом установки независимо от кода, а экзотические опции переименовываются.
+# Исключение — шаблон чата: без него встроенный рендерится без разделителей
+# (см. deploy/gigachat.jinja), и модель дописывает диалог за всех.
 exec "$BIN" \
     --model "$MODEL" \
     --host "$HOST" \
     --port "$PORT" \
     --threads "$THREADS" \
     --ctx-size "$CTX" \
+    --chat-template-file "$TEMPLATE" \
     --parallel 1

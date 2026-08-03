@@ -1,0 +1,30 @@
+{#-
+    Шаблон чата GigaChat-20B-A3B для llama-server.
+
+    Зачем свой, если он есть внутри GGUF: штатный шаблон берёт разделители из
+    переменной additional_special_tokens, а llama.cpp такой переменной шаблонам
+    не передаёт — она молча подставляется пустой. Промпт уезжает в модель без
+    единого разделителя, и та, не встретив <|message_sep|> (он же EOS),
+    дописывает диалог за всех участников, пока не упрётся в max_tokens.
+
+    Здесь те же токены, но вписаны буквально:
+      <|role_sep|>     — между именем роли и текстом
+      <|message_sep|>  — конец сообщения, он же признак конца ответа
+
+    Блок «available functions» модель ждёт после каждой реплики пользователя,
+    даже когда функций нет — пустой список [] и есть штатное «их нет».
+-#}
+{{- bos_token -}}
+{%- for message in messages -%}
+    {%- if message['role'] == 'system' -%}
+        {{- message['content'] + '<|message_sep|>' -}}
+    {%- else -%}
+        {{- message['role'] + '<|role_sep|>' + message['content'] + '<|message_sep|>' -}}
+        {%- if message['role'] == 'user' -%}
+            {{- 'available functions<|role_sep|>[]<|message_sep|>' -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- 'assistant<|role_sep|>' -}}
+{%- endif -%}
