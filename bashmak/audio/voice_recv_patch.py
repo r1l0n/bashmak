@@ -124,8 +124,32 @@ def _patch_dave_decrypt() -> None:
     decoder = recv_opus.PacketDecoder
     voice_data = recv_opus.VoiceData
 
-    unknown_ssrcs: set[int] = set()
+    modes: dict[int, str] = {}
     failures = 0
+
+    def report_mode(ssrc: int, session, version: int, user_id: int | None) -> None:  # noqa: ANN001
+        """Сказать в лог, что происходит с кадрами этого SSRC.
+
+        Только при смене режима, поэтому строк будет единицы, а не 50 в
+        секунду. Без этого по логу нельзя отличить рабочий приём от «звук
+        как R2D2»: в обоих случаях PCM доходит до буферов, но во втором в
+        Opus уходит нерасшифрованный шифротекст.
+        """
+        if user_id is None:
+            # Мапа SSRC→человек ещё не приехала. Кадр уйдёт в Opus как есть:
+            # негодный отбракует декодер, а подменять его тишиной нельзя —
+            # канал будет выглядеть рабочим, но останется немым.
+            mode = "SSRC не сопоставлен, кадры идут как есть"
+        elif session is None or not session.ready or version == 0:
+            mode = "канал без E2EE, кадры и так открытые"
+        elif _passthrough(session, user_id):
+            mode = "passthrough, отправитель шлёт открытые кадры"
+        else:
+            mode = "расшифровка DAVE"
+
+        if modes.get(ssrc) != mode:
+            modes[ssrc] = mode
+            log.info("ssrc=%s user=%s: %s (DAVE v%s)", ssrc, user_id, mode, version)
 
     def dave_decrypt(self, packet) -> None:  # noqa: ANN001 — rtp.AudioPacket
         nonlocal failures
@@ -137,26 +161,14 @@ def _patch_dave_decrypt() -> None:
             return
 
         state = getattr(self.sink.voice_client, "_connection", None)
+        session = getattr(state, "dave_session", None)
+        version = getattr(state, "dave_protocol_version", 0)
         user_id = self._cached_id
 
-        if user_id is None:
-            # Мапа SSRC→человек ещё не приехала. Кадр уйдёт в Opus как есть:
-            # негодный отбракует декодер, а подменять его тишиной нельзя —
-            # канал будет выглядеть рабочим, но останется немым.
-            if self.ssrc not in unknown_ssrcs:
-                unknown_ssrcs.add(self.ssrc)
-                log.debug("SSRC %s ещё не сопоставлен — кадры идут без расшифровки", self.ssrc)
-        else:
-            unknown_ssrcs.discard(self.ssrc)
+        report_mode(self.ssrc, session, version, user_id)
 
         try:
-            unwrapped = dave_unwrap(
-                getattr(state, "dave_session", None),
-                getattr(state, "dave_protocol_version", 0),
-                user_id,
-                davey.MediaType.audio,
-                payload,
-            )
+            unwrapped = dave_unwrap(session, version, user_id, davey.MediaType.audio, payload)
         except Exception as exc:
             # Кадр не трогаем: он мог оказаться открытым, и тогда ещё
             # пригодится. Негодный отбракует Opus — ценой одного кадра.

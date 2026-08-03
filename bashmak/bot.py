@@ -409,7 +409,10 @@ def main() -> None:
 
     bot = build_bot(cfg)
     try:
-        bot.run(cfg.discord_token)
+        # log_handler=None — иначе run() настраивает логирование сам: вешает
+        # свой хендлер (каждая строка библиотеки печатается дважды) и ставит
+        # логгеру discord уровень INFO уже ПОСЛЕ нашего setup_logging().
+        bot.run(cfg.discord_token, log_handler=None)
     except KeyboardInterrupt:  # pragma: no cover
         log.info("прервано с клавиатуры")
 

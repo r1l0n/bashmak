@@ -88,6 +88,16 @@ def setup_logging(cfg: Any = None) -> None:
     logging.getLogger("discord").setLevel(max(level, logging.WARNING))
     logging.getLogger("httpx").setLevel(max(level, logging.WARNING))
 
+    # А эти двое болтливы на INFO, то есть даже когда discord поднимают до
+    # INFO ради отладки голоса. reader пишет строку на каждый RTCP-отчёт
+    # (раз в секунду на канал: он считает «неожиданным» всё, кроме
+    # ReceiverReport, а Discord штатно шлёт SenderReport), gateway — на
+    # каждый кадр голосового WS, потому что discord.py 2.7 добавила туда
+    # поле seq, о котором расширение не знает. Обе строки безвредны и обе
+    # делают лог нечитаемым.
+    for noisy in ("discord.ext.voice_recv.reader", "discord.ext.voice_recv.gateway"):
+        logging.getLogger(noisy).setLevel(max(level, logging.WARNING))
+
 
 @contextmanager
 def stage(logger: logging.Logger, name: str, **extra: Any) -> Iterator[dict[str, Any]]:
