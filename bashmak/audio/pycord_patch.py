@@ -76,6 +76,17 @@ def apply() -> None:
     _patch_decoder_resilience()
 
 
+def _passthrough(dave, user_id: int) -> bool:  # noqa: ANN001 — davey.DaveSession
+    """Шлёт ли этот участник открытые кадры.
+
+    Сессия DAVE стартует именно в этом режиме (``set_passthrough_mode`` в
+    ``voice/state.py``), шифрование включается позже. Расшифровывать открытый
+    кадр нельзя — davey ответит ``NoValidCryptorFound``.
+    """
+    check = getattr(dave, "can_passthrough", None)
+    return bool(check and check(user_id))
+
+
 def take_lowest(buffer) -> object | None:  # noqa: ANN001 — discord JitterBuffer
     """Снять пакет с наименьшим ``sequence``, не трогая остальные.
 
@@ -103,7 +114,6 @@ def _patch_rtp_decryption() -> None:
         return
 
     crypto_error = getattr(voice_reader, "CryptoError", Exception)
-    opus_silence = voice_reader.OPUS_SILENCE
     davey = getattr(voice_reader, "davey", None)
     if davey is None:
         log.error("нет пакета davey — канал с обязательным E2EE не примет бота")
@@ -130,16 +140,17 @@ def _patch_rtp_decryption() -> None:
                 return b""
 
             unknown_ssrcs.discard(packet.ssrc)
-            try:
-                payload = dave.decrypt(user_id, davey.MediaType.audio, payload)
-            except Exception as exc:
-                # Тишина вместо мусора: она декодируется, а мусор — нет.
-                # Молча подменять нельзя — так канал «работает», но немой.
-                nonlocal failures
-                failures += 1
-                if failures == 1 or failures % _DROP_LOG_EVERY == 0:
-                    log.warning("DAVE не расшифровал пакет (%d-й): %s", failures, exc)
-                payload = opus_silence
+            if not _passthrough(dave, user_id):
+                try:
+                    payload = dave.decrypt(user_id, davey.MediaType.audio, payload)
+                except Exception as exc:
+                    # payload не трогаем: кадр мог оказаться открытым. Если это
+                    # всё же шифротекст, его отбракует Opus, и пакет пропадёт
+                    # один, а не подменится тишиной на весь разговор.
+                    nonlocal failures
+                    failures += 1
+                    if failures == 1 or failures % _DROP_LOG_EVERY == 0:
+                        log.warning("DAVE не расшифровал пакет (%d-й): %s", failures, exc)
 
         packet.decrypted_data = payload
         return payload
