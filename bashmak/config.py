@@ -41,8 +41,13 @@ class Section:
         return Section(value, self._root) if isinstance(value, dict) else value
 
     def path(self, name: str) -> Path:
-        """Значение ключа как абсолютный путь (относительные — от корня проекта)."""
-        raw = Path(str(self._data[name])).expanduser()
+        """Значение ключа как абсолютный путь (относительные — от корня проекта).
+
+        Через __getattr__, а не self._data[name]: голый KeyError в отчёте
+        доктора («KeyError: 'model_path'») не говорит ни в какой секции
+        искать, ни что ключ переименовали.
+        """
+        raw = Path(str(getattr(self, name))).expanduser()
         return raw if raw.is_absolute() else (self._root / raw)
 
     def as_dict(self) -> dict[str, Any]:
