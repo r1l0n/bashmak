@@ -8,41 +8,53 @@
 разбирает методы по имени режима в ``__init__``, и после создания объекта
 подменять уже поздно.
 
+Почему нельзя просто отказаться от E2EE
+---------------------------------------
+Первой мыслью было объявить Discord'у нулевую версию DAVE и жить на
+транспортном шифровании. Не выйдет: канал отвечает close code **4017**,
+документированный как *«E2EE/DAVE protocol required: this channel requires
+a client supporting E2EE via the DAVE Protocol»*, и голосовой шлюз рвёт
+соединение ещё до приёма. Тем же кодом, к слову, объясняются старые падения
+на py-cord 2.6.1 и 2.7.2 — они про DAVE не знают вовсе.
+
+Значит DAVE должен остаться включённым, и чинить надо расшифровку.
+
 Что именно чинится
 ------------------
 
-1. **DAVE выключается.** ``py-cord[voice]`` тянет ``davey``, поэтому в
-   IDENTIFY уходит ``max_dave_protocol_version: 1`` и Discord включает
-   сквозное шифрование, принимать которое библиотека не умеет. Версию для
-   звонка Discord берёт как минимум по участникам, так что объявленный ноль
-   просто снимает E2EE, пока бот в канале, — как любой клиент без поддержки
-   DAVE. Для нашей задачи это ничего не меняет: бот и так легальный
-   участник, который всё расшифровывает и отправляет в STT.
+1. **RTP-расширение срезается по фактической длине.**
+   ``_decrypt_rtp_aead_xchacha20_poly1305_rtpsize`` считает смещение через
+   ``update_extended_header()``, выбрасывает его и режет захардкоженные
+   8 байт. Это верно только когда расширение занимает ровно два слова.
 
-2. **``decrypt_rtp()`` начинает возвращать расшифрованное.** В оригинале
-   результат транспортной расшифровки кладётся в локальную переменную и
-   теряется, а наружу отдаётся ``packet.decrypted_data`` — оно
-   присваивается только внутри ветки DAVE. Без DAVE каждый пакет уходит
-   в ``None`` и отбрасывается в ``AudioReader.callback``
-   (``if not rtp_packet.decrypted_data: return``), то есть канал молчит.
+2. **Расширение срезается ровно один раз.** Оригинальная ``decrypt_rtp()``
+   режет его повторно — уже из данных, расшифрованных DAVE, — и уносит
+   начало Opus. Отсюда ``OpusError('corrupted stream')`` на первом же пакете
+   речи. DAVE шифрует только полезную нагрузку, расширение к этому моменту
+   давно снято.
 
-3. **RTP-расширение срезается по фактической длине.** Оригинал считает
-   offset через ``update_extended_header()``, выбрасывает его и режет
-   захардкоженные 8 байт. Это верно только когда расширение занимает ровно
-   два слова; иначе в Opus уезжает мусор — тот самый
-   ``OpusError('corrupted stream')``. Правильная длина — ``length * 4`` из
-   заголовка расширения, её и возвращает ``update_extended_header()``.
+3. **``decrypt_rtp()`` всегда возвращает расшифрованное.** В оригинале
+   результат кладётся в локальную переменную, а наружу отдаётся
+   ``packet.decrypted_data``, которое присваивается только внутри ветки
+   DAVE. Если SSRC ещё не сопоставлен с человеком, оттуда уходит ``None`` —
+   и ``AudioReader.callback`` молча выбрасывает пакет.
 
-4. **Ошибка декодирования перестаёт убивать приём.** Исключение из
+4. **Бессмысленная расшифровка поверх готового PCM убрана.** В ``opus.py``
+   после декодирования остался вызов ``dave.decrypt()`` уже по декодированным
+   сэмплам. Флаг ``HAS_DAVEY`` читается в этом файле ровно в одном месте —
+   в условии перед этим вызовом, — поэтому достаточно погасить его копию в
+   модуле ``discord.opus``, не трогая остальную библиотеку.
+
+5. **Ошибка декодирования перестаёт убивать приём.** Исключение из
    ``PacketDecoder.pop_data()`` выходит в ``PacketRouter._do_run``, поток
-   роутера умирает и в ``finally`` зовёт ``stop_recording()`` — бот
-   остаётся в канале навсегда глухим. Битый пакет должен стоить одного
-   пакета, а не сессии.
+   роутера умирает и в ``finally`` зовёт ``stop_recording()`` — бот остаётся
+   в канале навсегда глухим. Битый пакет должен стоить одного пакета.
 
-Пункты 2–4 совпадают по смыслу с форком vito1317/pycord@5a95f98 — диагноз
-про двойное срезание расширения найден там. Сам форк не используется: он
-ответвлён от master до 2.8.0, а подменять библиотеку целиком в процессе,
-который держит токен, — лишний риск.
+Пункты 1, 2 и 5 совпадают по смыслу с форком
+`vito1317/pycord@5a95f98 <https://github.com/vito1317/pycord/commit/5a95f984>`_
+— диагноз про двойное срезание расширения найден там. Сам форк не
+используется: он ответвлён от master до выхода 2.8.0, а подменять библиотеку
+целиком в процессе, который держит токен, — лишний риск.
 """
 
 from __future__ import annotations
@@ -51,61 +63,61 @@ import logging
 
 log = logging.getLogger(__name__)
 
-#: Сколько ошибок декодирования пропустить между сообщениями в лог.
-_DECODE_ERROR_LOG_EVERY = 500
+#: Сколько пропущенных пакетов между сообщениями в лог.
+_DROP_LOG_EVERY = 500
 
 
 def apply() -> None:
     """Поставить все заплатки. Зовётся один раз на старте процесса."""
-    _disable_dave()
     _patch_rtp_decryption()
+    _drop_dave_decrypt_over_pcm()
     _patch_decoder_resilience()
 
 
-def _disable_dave() -> None:
-    """Объявить Discord'у нулевую версию DAVE — см. пункт 1 в докстринге.
-
-    ``VoiceConnectionState.max_dave_proto_version`` — property поверх
-    модульной константы, поэтому правится константа.
-    """
-    from discord.voice import state as voice_state
-    from discord.voice.utils import dependencies as voice_deps
-
-    modules = (voice_deps, voice_state)
-    if not any(hasattr(module, "DAVE_PROTOCOL_VERSION") for module in modules):
-        log.warning("не нашёл DAVE_PROTOCOL_VERSION — приём голоса может не работать")
-        return
-
-    for module in modules:
-        module.DAVE_PROTOCOL_VERSION = 0
-    log.debug("DAVE отключён: объявлена версия 0")
-
-
 def _patch_rtp_decryption() -> None:
-    """Пункты 2 и 3: отдавать расшифрованное и резать расширение по длине."""
+    """Пункты 1–3: расшифровка RTP до чистого Opus."""
     from discord.voice.receive import reader as voice_reader
 
     decryptor = getattr(voice_reader, "PacketDecryptor", None)
     if decryptor is None:
-        log.warning("не нашёл PacketDecryptor — приём голоса может не работать")
+        log.warning("не нашёл PacketDecryptor — приём голоса работать не будет")
         return
 
     crypto_error = getattr(voice_reader, "CryptoError", Exception)
+    opus_silence = voice_reader.OPUS_SILENCE
+    davey = getattr(voice_reader, "davey", None)
+    if davey is None:
+        log.error("нет пакета davey — канал с обязательным E2EE не примет бота")
+        return
+
+    unknown_ssrcs: set[int] = set()
 
     def decrypt_rtp(self, packet):  # noqa: ANN001 — сигнатура задана py-cord
-        """Транспортная расшифровка. Ветки DAVE нет: он выключен на входе.
+        """Транспорт → снятие расширения → DAVE. Расширение режется один раз."""
+        payload = self._decryptor_rtp(packet)
+        state = self.client._connection
+        dave = getattr(state, "dave_session", None)
 
-        Если DAVE всё же поднялся (значит `_disable_dave` промахнулся мимо
-        новой версии py-cord), в Opus поедет шифротекст — предупреждаем, не
-        дожидаясь потока `corrupted stream`.
-        """
-        if getattr(self.client._connection, "dave_session", None) is not None:
-            log.error(
-                "DAVE-сессия поднялась вопреки настройке — приём голоса не заработает, "
-                "смотрите bashmak/audio/pycord_patch.py"
-            )
-        packet.decrypted_data = self._decryptor_rtp(packet)
-        return packet.decrypted_data
+        if dave is not None and dave.ready:
+            user_id = state.ssrc_user_map.get(packet.ssrc)
+            if not user_id:
+                # Мапа SSRC→человек ещё не приехала. Расшифровать нечем, а
+                # отдавать шифротекст в Opus незачем — пропускаем пакет.
+                if packet.ssrc not in unknown_ssrcs:
+                    unknown_ssrcs.add(packet.ssrc)
+                    log.debug("SSRC %s ещё не сопоставлен — пакеты пропускаются", packet.ssrc)
+                packet.decrypted_data = b""
+                return b""
+
+            unknown_ssrcs.discard(packet.ssrc)
+            try:
+                payload = dave.decrypt(user_id, davey.MediaType.audio, payload)
+            except Exception:
+                # Тишина вместо мусора: она декодируется, а мусор — нет.
+                payload = opus_silence
+
+        packet.decrypted_data = payload
+        return payload
 
     def decrypt_xchacha(self, packet):  # noqa: ANN001 — сигнатура задана py-cord
         """То же, что в 2.8.1, но расширение режется по фактической длине."""
@@ -131,13 +143,27 @@ def _patch_rtp_decryption() -> None:
     decryptor._decrypt_rtp_aead_xchacha20_poly1305_rtpsize = decrypt_xchacha
 
 
+def _drop_dave_decrypt_over_pcm() -> None:
+    """Пункт 4: погасить HAS_DAVEY в discord.opus.
+
+    Единственное, что этот флаг охраняет в файле, — вызов ``dave.decrypt()``
+    по уже декодированным сэмплам. Копия флага в
+    ``discord.voice.utils.dependencies`` не трогается, DAVE остаётся живым.
+    """
+    from discord import opus as discord_opus
+
+    if not getattr(discord_opus, "HAS_DAVEY", False):
+        return
+    discord_opus.HAS_DAVEY = False
+
+
 def _patch_decoder_resilience() -> None:
-    """Пункт 4: битый пакет стоит пакета, а не всей сессии приёма."""
+    """Пункт 5: битый пакет стоит пакета, а не всей сессии приёма."""
     from discord import opus as discord_opus
 
     decoder = getattr(discord_opus, "PacketDecoder", None)
     if decoder is None:
-        log.warning("не нашёл PacketDecoder — приём голоса не переживёт битый пакет")
+        log.warning("не нашёл PacketDecoder — приём не переживёт битый пакет")
         return
 
     original = decoder.pop_data
@@ -150,7 +176,7 @@ def _patch_decoder_resilience() -> None:
             return original(self, timeout=timeout)
         except opus_error as exc:
             dropped += 1
-            if dropped == 1 or dropped % _DECODE_ERROR_LOG_EVERY == 0:
+            if dropped == 1 or dropped % _DROP_LOG_EVERY == 0:
                 log.warning("пропущен неразобранный голосовой пакет (%d-й): %s", dropped, exc)
             # None роутер просто пропустит, не трогая синк.
             return None
