@@ -15,6 +15,42 @@ class LlmError(RuntimeError):
     pass
 
 
+#: Разделители формата GigaChat: между ролью и текстом, и в конце сообщения.
+#: <|message_sep|> у этой модели заодно EOS — по нему генерация и кончается.
+ROLE_SEP = "<|role_sep|>"
+MESSAGE_SEP = "<|message_sep|>"
+
+
+def render_prompt(messages: list[dict[str, str]]) -> str:
+    """Собрать промпт в формате GigaChat.
+
+    Почему вручную, а не через /v1/chat/completions: чат-слой llama.cpp этот
+    формат не тянет. Штатный шаблон берёт разделители из переменной
+    additional_special_tokens, которой в llama.cpp нет, — промпт уезжает без
+    разделителей вовсе. А со своим шаблоном сборка b10237 сама выводит
+    peg-парсер ответа и падает с 500 «output does not match the expected
+    peg-native format» уже на нормальной реплике модели.
+
+    Здесь же формат целиком наш, и ломаться в нём нечему.
+
+    Без <s> намеренно: /completion токенизирует промпт с add_special=true и
+    ставит BOS сам, а второй BOS модель бы только сбил.
+    """
+    parts: list[str] = []
+    for message in messages:
+        content = message["content"]
+        if message["role"] == "system":
+            parts.append(f"{content}{MESSAGE_SEP}")
+            continue
+        parts.append(f"{message['role']}{ROLE_SEP}{content}{MESSAGE_SEP}")
+        if message["role"] == "user":
+            # Блок функций модель ждёт после каждой реплики пользователя.
+            # Пустой список — это штатное «их нет», а не заглушка.
+            parts.append(f"available functions{ROLE_SEP}[]{MESSAGE_SEP}")
+    parts.append(f"assistant{ROLE_SEP}")
+    return "".join(parts)
+
+
 #: Сколько букв объяснения от сервера тащить в лог. Ошибка шаблона чата бывает
 #: длинной (minja печатает кусок шаблона), но начало — самое важное.
 _DETAIL_CHARS = 600
@@ -108,33 +144,35 @@ class LlmClient:
         retries: int = 1,
     ) -> str:
         self._check_roles(messages)
+        prompt = render_prompt(messages)
         payload: dict[str, Any] = {
-            "messages": messages,
-            "max_tokens": max_tokens if max_tokens is not None else self.max_tokens,
+            "prompt": prompt,
+            "n_predict": max_tokens if max_tokens is not None else self.max_tokens,
             "temperature": temperature if temperature is not None else self.temperature,
             "top_p": self.top_p,
             "stream": False,
+            # Конец реплики — он же EOS, но модель иногда печатает его текстом.
+            "stop": [MESSAGE_SEP],
+            # Системная часть промпта не меняется, и её префикс сервер переиспользует.
+            "cache_prompt": True,
         }
         if json_schema is not None:
             # llama-server умеет ограничивать вывод схемой — так JSON приходит
             # валидным, а не «почти». Если сборка старая и параметр не понят,
             # ответ всё равно разбирается защитно на стороне вызывающего.
-            payload["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "decision", "schema": json_schema, "strict": True},
-            }
+            payload["json_schema"] = json_schema
 
-        log.debug("запрос к LLM: %s", payload["messages"])
+        log.debug("запрос к LLM: %r", prompt)
 
         last_error: Exception | None = None
         async with self._inference:
             for attempt in range(retries + 1):
                 try:
-                    response = await self._client.post("/v1/chat/completions", json=payload)
+                    response = await self._client.post("/completion", json=payload)
                     if response.status_code >= 400:
                         raise LlmError(_server_error(response))
                     data = response.json()
-                    return (data["choices"][0]["message"]["content"] or "").strip()
+                    return (data["content"] or "").strip()
                 except (httpx.HTTPError, LlmError, KeyError, IndexError, ValueError) as exc:
                     last_error = exc
                     if attempt < retries:
