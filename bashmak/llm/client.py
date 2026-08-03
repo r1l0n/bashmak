@@ -15,6 +15,31 @@ class LlmError(RuntimeError):
     pass
 
 
+#: Сколько букв объяснения от сервера тащить в лог. Ошибка шаблона чата бывает
+#: длинной (minja печатает кусок шаблона), но начало — самое важное.
+_DETAIL_CHARS = 600
+
+
+def _server_error(response: httpx.Response) -> str:
+    """Достать из ответа причину, а не только код.
+
+    raise_for_status() показывает «500 Internal Server Error» и выбрасывает
+    тело — а llama-server именно там пишет, что случилось: ошибку шаблона
+    чата, переполненный контекст, неизвестный параметр. Дважды на этом
+    потеряли время, поэтому разбираем тело руками.
+    """
+    detail = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            error = body.get("error")
+            detail = (error.get("message") if isinstance(error, dict) else str(error)) or ""
+    except ValueError:
+        pass
+    detail = (detail or response.text).strip()[:_DETAIL_CHARS]
+    return f"{response.status_code} от llama-server: {detail or '(пустой ответ)'}"
+
+
 class LlmClient:
     def __init__(self, cfg) -> None:  # noqa: ANN001 — bashmak.config.Section
         self.base_url = str(cfg.get("server_url", "http://127.0.0.1:8080")).rstrip("/")
@@ -106,10 +131,11 @@ class LlmClient:
             for attempt in range(retries + 1):
                 try:
                     response = await self._client.post("/v1/chat/completions", json=payload)
-                    response.raise_for_status()
+                    if response.status_code >= 400:
+                        raise LlmError(_server_error(response))
                     data = response.json()
                     return (data["choices"][0]["message"]["content"] or "").strip()
-                except (httpx.HTTPError, KeyError, IndexError, ValueError) as exc:
+                except (httpx.HTTPError, LlmError, KeyError, IndexError, ValueError) as exc:
                     last_error = exc
                     if attempt < retries:
                         log.warning("LLM-запрос не удался (%s), повтор %d", exc, attempt + 1)
