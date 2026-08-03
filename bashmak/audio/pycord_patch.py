@@ -59,6 +59,7 @@ a client supporting E2EE via the DAVE Protocol»*, и голосовой шлю�
 
 from __future__ import annotations
 
+import heapq
 import logging
 
 log = logging.getLogger(__name__)
@@ -71,7 +72,25 @@ def apply() -> None:
     """Поставить все заплатки. Зовётся один раз на старте процесса."""
     _patch_rtp_decryption()
     _drop_dave_decrypt_over_pcm()
+    _patch_gap_recovery()
     _patch_decoder_resilience()
+
+
+def take_lowest(buffer) -> object | None:  # noqa: ANN001 — discord JitterBuffer
+    """Снять пакет с наименьшим ``sequence``, не трогая остальные.
+
+    Замена штатному «выбросить буфер целиком». Лезет во внутренности
+    ``JitterBuffer`` осознанно: публичного способа достать один пакет в обход
+    проверки на дыру в последовательности у него нет.
+    """
+    heap = buffer._buffer
+    if not heap:
+        return None
+
+    packet = heapq.heappop(heap)
+    buffer._last_tx_seq = packet.sequence
+    buffer._update_has_item()
+    return packet
 
 
 def _patch_rtp_decryption() -> None:
@@ -91,6 +110,7 @@ def _patch_rtp_decryption() -> None:
         return
 
     unknown_ssrcs: set[int] = set()
+    failures = 0
 
     def decrypt_rtp(self, packet):  # noqa: ANN001 — сигнатура задана py-cord
         """Транспорт → снятие расширения → DAVE. Расширение режется один раз."""
@@ -112,8 +132,13 @@ def _patch_rtp_decryption() -> None:
             unknown_ssrcs.discard(packet.ssrc)
             try:
                 payload = dave.decrypt(user_id, davey.MediaType.audio, payload)
-            except Exception:
+            except Exception as exc:
                 # Тишина вместо мусора: она декодируется, а мусор — нет.
+                # Молча подменять нельзя — так канал «работает», но немой.
+                nonlocal failures
+                failures += 1
+                if failures == 1 or failures % _DROP_LOG_EVERY == 0:
+                    log.warning("DAVE не расшифровал пакет (%d-й): %s", failures, exc)
                 payload = opus_silence
 
         packet.decrypted_data = payload
@@ -155,6 +180,41 @@ def _drop_dave_decrypt_over_pcm() -> None:
     if not getattr(discord_opus, "HAS_DAVEY", False):
         return
     discord_opus.HAS_DAVEY = False
+
+
+def _patch_gap_recovery() -> None:
+    """Пункт 6: потерянный пакет не должен уносить с собой весь буфер.
+
+    ``_flag_ready_state`` будит роутер по ``peek()`` — то есть как только в
+    джиттер-буфере накопилось больше ``pref_size`` пакетов. А ``pop()``
+    отдаёт пакет только когда взведён ``_has_item``, то есть когда
+    последовательность идёт без дыр. Условия разные, и на каждой дыре
+    ``pop()`` возвращает ``None``, после чего оригинальный
+    ``_get_next_packet`` делает ``flush()`` и оставляет один пакет из
+    десяти — «N packets were lost being flushed» в логе. На туннеле, где
+    потери обычное дело, до VAD доходят обрывки, и речи в них нет.
+
+    Вместо этого перескакиваем дыру: берём следующий по порядку пакет,
+    остальные остаются в буфере.
+    """
+    from discord import opus as discord_opus
+
+    decoder = getattr(discord_opus, "PacketDecoder", None)
+    if decoder is None:
+        log.warning("не нашёл PacketDecoder — потери пакетов будут съедать речь")
+        return
+
+    def _get_next_packet(self, timeout: float):
+        packet = self._buffer.pop(timeout=timeout)
+        if packet is None:
+            packet = take_lowest(self._buffer)
+            if packet is None:
+                return None
+        if not packet:
+            packet = self._make_fakepacket()
+        return packet
+
+    decoder._get_next_packet = _get_next_packet
 
 
 def _patch_decoder_resilience() -> None:
