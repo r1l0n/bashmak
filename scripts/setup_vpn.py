@@ -53,6 +53,25 @@ def die(text: str) -> None:
     raise SystemExit(1)
 
 
+def read(prompt: str) -> str:
+    """input(), не падающий на кривой кодировке.
+
+    Под sudo локаль часто C, а терминал шлёт что-нибудь своё: одно нажатие
+    «Y» в русской раскладке — и обычный input() валится с UnicodeDecodeError
+    посреди диалога, теряя всё уже введённое.
+    """
+    while True:
+        try:
+            return input(prompt).strip()
+        except UnicodeDecodeError:
+            print(f"    {WARN}не разобрал ввод (кодировка) — повторите{OFF}")
+
+
+def yes(prompt: str) -> bool:
+    """Согласие по умолчанию. Понимает и русскую раскладку."""
+    return read(prompt).lower() not in ("n", "no", "н", "нет", "т")
+
+
 def mask(value: str, keep: int = 4) -> str:
     if len(value) <= keep * 2:
         return "*" * len(value)
@@ -129,9 +148,12 @@ def ask(prompt: str, current: str | None, validator, secret: bool = False):  # n
     """Спросить значение, показывая текущее как вариант по умолчанию."""
     suffix = f" [{mask(current) if secret else current}]" if current else ""
     while True:
-        raw = (getpass if secret else input)(f"  {prompt}{suffix}: ").strip()
+        if secret:
+            raw = getpass(f"  {prompt}{suffix}: ").strip()
+        else:
+            raw = read(f"  {prompt}{suffix}: ")
         if not raw and current:
-            raw = current
+            raw = str(current)
         try:
             return validator(raw)
         except ValueError as exc:
@@ -198,7 +220,7 @@ def collect() -> dict:
 
     print(f"\n{HEAD}Вставьте ссылку vless:// из панели{OFF}")
     print("  (Enter — ввести поля по одному)\n")
-    link = input("  ссылка: ").strip()
+    link = read("  ссылка: ")
 
     if link:
         try:
@@ -279,8 +301,7 @@ def verify_and_restart() -> None:
         die(f"sing-box не принял конфиг:\n       {check.stderr.strip() or check.stdout.strip()}")
     ok("конфиг валиден")
 
-    answer = input("\n  Перезапустить sing-box и проверить туннель? [Y/n]: ").strip().lower()
-    if answer in ("n", "no", "н"):
+    if not yes("\n  Перезапустить sing-box и проверить туннель? [Y/n]: "):
         print("\n  Тогда вручную: sudo systemctl restart sing-box\n")
         return
 
@@ -327,7 +348,7 @@ def main() -> None:
     print(f"  SNI:         {values['server_name']}")
     print(f"  flow / fp:   {values['flow']} / {values['fingerprint']}")
 
-    if input("\n  Записать? [Y/n]: ").strip().lower() in ("n", "no", "н"):
+    if not yes("\n  Записать? [Y/n]: "):
         print("\n  Отменено, ничего не тронуто.\n")
         return
 

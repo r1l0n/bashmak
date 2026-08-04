@@ -254,6 +254,37 @@ def _check_socks() -> str:
     return f"слушает {SOCKS_ADDRESS}"
 
 
+def _check_tunnel_egress() -> str:
+    """Проверить, что через туннель реально ходит трафик.
+
+    Слушающий SOCKS ещё ничего не гарантирует: плечо до VPS может быть
+    мёртвым, а в конфиге — незаменённый плейсхолдер вместо адреса. Без этой
+    проверки симптом всплывал только в самом низу отчёта, под видом проблемы
+    с токеном Discord.
+    """
+    if shutil.which("curl") is None:
+        return "curl не найден, проверка пропущена"
+
+    result = subprocess.run(
+        [
+            "curl", "-sS", "--socks5-hostname", SOCKS_ADDRESS, "--max-time", "15",
+            "-o", "/dev/null", "-w", "%{http_code}",
+            "https://discord.com/api/v10/gateway",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    code = result.stdout.strip()
+    if code == "200":
+        return "Discord отвечает 200 через туннель"
+
+    error = result.stderr.strip()
+    hint = ""
+    if "(97)" in error or "SOCKS5" in error:
+        hint = " — плечо до VPS не работает: журнал sing-box покажет причину"
+    raise RuntimeError(f"код {code or '—'} {error}{hint}")
+
+
 def _check_dns_hijack() -> str:
     """sing-box при старте прописывает себя резолвером ВСЕГО хоста.
 
@@ -381,6 +412,7 @@ async def run(offline: bool) -> int:
         report.check("sing-box", _check_singbox)
         report.check("интерфейс", _check_tun)
         report.check("SOCKS", _check_socks)
+        report.check("выход наружу", _check_tunnel_egress)
         # Не критично для бота: он ходит через свой resolv.conf. Но ломает
         # DNS всему остальному на машине, так что молчать об этом нельзя.
         report.check("перехват DNS", _check_dns_hijack, critical=False)
