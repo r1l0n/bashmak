@@ -12,6 +12,7 @@
 #   ./scripts/setup.sh --models-only        # только докачать модели
 #   ./scripts/setup.sh --systemd            # + установить и включить юниты
 #   ./scripts/setup.sh --tunnel             # + пустить трафик бота через sing-box
+#   ./scripts/setup.sh --vpn                # + настроить сам туннель (мастер), подразумевает --tunnel
 #   ./scripts/setup.sh --force              # перекачать/пересобрать всё
 #
 # Юниты генерируются из deploy/*.template при установке. Если шаблон поменялся
@@ -43,6 +44,7 @@ DO_MODELS=1
 DO_ENV=1
 DO_SYSTEMD=0
 DO_TUNNEL=0
+DO_VPN=0
 FORCE=0
 
 while [ $# -gt 0 ]; do
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
         --models-only) DO_ENV=0; shift ;;
         --systemd)     DO_SYSTEMD=1; shift ;;
         --tunnel)      DO_TUNNEL=1; DO_SYSTEMD=1; shift ;;
+        --vpn)         DO_VPN=1; DO_TUNNEL=1; DO_SYSTEMD=1; shift ;;
         --force)       FORCE=1; shift ;;
         -h|--help)     sed -n '2,25p' "$0"; exit 0 ;;
         *)             die "неизвестный флаг: $1 (см. --help)" ;;
@@ -400,6 +403,23 @@ setup_config() {
     fi
 }
 
+# ---------------------------------------------------------- туннель ----
+setup_vpn() {
+    [ "$DO_VPN" -eq 1 ] || return 0
+
+    step "Туннель: настройка sing-box"
+
+    if [ ! -x /usr/local/bin/sing-box ]; then
+        ok "sing-box не установлен — ставлю"
+        $SUDO "$ROOT/scripts/install_singbox.sh"
+    fi
+
+    # Мастер сам спросит параметры, проверит их и перезапустит сервис.
+    # Отдельным скриптом, потому что тут интерактивный ввод и разбор JSON —
+    # в bash это вышло бы длиннее и хуже проверялось.
+    $SUDO python3 "$ROOT/scripts/setup_vpn.py"
+}
+
 # -------------------------------------------------------- 7. systemd ----
 setup_systemd() {
     step "7/8  systemd"
@@ -505,5 +525,6 @@ else
 fi
 
 setup_config
+setup_vpn
 setup_systemd
 summary

@@ -14,6 +14,8 @@ import asyncio
 import ctypes.util
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -190,6 +192,87 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
     return f"{audio.size / 16000:.1f} с → VAD {best:.2f} → {transcript.text.strip()!r}"
 
 
+# ------------------------------------------------------------- туннель ----
+#
+# Когда Discord закрыт по IP, весь бот держится на sing-box. Если он лёг,
+# симптом всплывал только в самом конце отчёта — «DISCORD_TOKEN: timeout», —
+# и выглядел как проблема с токеном или сетью. Проверяем причину, а не
+# следствие.
+
+SINGBOX_CONFIG = Path("/etc/sing-box/config.json")
+SOCKS_ADDRESS = os.environ.get("BASHMAK_SOCKS", "127.0.0.1:10808")
+TUN_INTERFACE = os.environ.get("BASHMAK_TUN_IF", "tun-bashmak")
+
+
+def _tunnel_configured() -> bool:
+    return SINGBOX_CONFIG.exists()
+
+
+def _run(command: list[str], timeout: float = 10.0) -> str:
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return result.stdout
+
+
+def _singbox_last_error() -> str:
+    """Последняя строка FATAL/ERROR из журнала — обычно там и лежит причина."""
+    for line in reversed(_run(
+        ["journalctl", "-u", "sing-box", "-n", "30", "--no-pager", "-o", "cat"]
+    ).splitlines()):
+        if "FATAL" in line or "ERROR" in line:
+            return line.strip()
+    return ""
+
+
+def _check_singbox() -> str:
+    if shutil.which("systemctl") is None:
+        raise RuntimeError("systemctl не найден")
+
+    state = _run(["systemctl", "is-active", "sing-box"]).strip() or "unknown"
+    if state == "active":
+        return "active"
+
+    hint = _singbox_last_error() or "подробности: journalctl -u sing-box -n 50"
+    raise RuntimeError(f"{state} — {hint}")
+
+
+def _check_tun() -> str:
+    if not Path(f"/sys/class/net/{TUN_INTERFACE}").exists():
+        raise RuntimeError(f"интерфейса {TUN_INTERFACE} нет — sing-box не поднял туннель")
+    return TUN_INTERFACE
+
+
+def _check_socks() -> str:
+    host, _, port = SOCKS_ADDRESS.rpartition(":")
+    try:
+        with socket.create_connection((host, int(port)), timeout=3):
+            pass
+    except OSError as exc:
+        raise RuntimeError(f"{SOCKS_ADDRESS} не принимает соединения ({exc})") from exc
+    return f"слушает {SOCKS_ADDRESS}"
+
+
+def _check_dns_hijack() -> str:
+    """sing-box при старте прописывает себя резолвером ВСЕГО хоста.
+
+    Домен ``~.`` на линке туннеля означает «все запросы сюда»: после этого
+    на машине умирает DNS целиком, включая git и apt. tunnel.sh это снимает,
+    но перехват возвращается при каждом рестарте sing-box.
+    """
+    if shutil.which("resolvectl") is None:
+        return "resolvectl нет, проверка пропущена"
+
+    status = _run(["resolvectl", "status", TUN_INTERFACE])
+    if "~." in status:
+        raise RuntimeError(
+            f"{TUN_INTERFACE} перехватил DNS всего хоста. "
+            f"Лечится: sudo resolvectl revert {TUN_INTERFACE}"
+        )
+    return "перехвата нет"
+
+
 TOKEN_URL = "https://discord.com/api/v10/users/@me"
 
 
@@ -287,6 +370,20 @@ async def run(offline: bool) -> int:
     report.check("STT", lambda: _check_file(cfg.stt.path("model_path"), "faster-whisper"))
     report.check("TTS", lambda: _check_file(cfg.tts.path("model_path"), "silero-tts"))
     report.check("llama-server", lambda: _check_llama_binary(cfg.root))
+
+    # Раньше проверок Discord: если туннель лежит, дальше падает всё, и
+    # разбираться надо здесь, а не в «DISCORD_TOKEN: timeout» внизу отчёта.
+    print("\n туннель")
+    if not _tunnel_configured():
+        report.add(WARN, "sing-box", f"не настроен ({SINGBOX_CONFIG} нет)")
+        report.add(WARN, "", "если Discord доступен напрямую — так и должно быть")
+    else:
+        report.check("sing-box", _check_singbox)
+        report.check("интерфейс", _check_tun)
+        report.check("SOCKS", _check_socks)
+        # Не критично для бота: он ходит через свой resolv.conf. Но ломает
+        # DNS всему остальному на машине, так что молчать об этом нельзя.
+        report.check("перехват DNS", _check_dns_hijack, critical=False)
 
     print("\n рантайм")
     if offline:
