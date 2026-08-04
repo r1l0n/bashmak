@@ -69,6 +69,8 @@ done
 # переведённый. Профиль теперь выбирает только STT.
 GIGACHAT_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
 GIGACHAT_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
+# Запасной репозиторий с тем же квантом, если основной переименовали или снесли.
+LLM_REPO_ALT=""
 
 case "$PROFILE" in
     fast|balanced)
@@ -85,7 +87,9 @@ case "$PROFILE" in
         # «выученный», а не родной — токенизатор режет его расточительнее, и
         # прирост в словах за секунду меньше, чем кажется по tok/s.
         # Файл вдвое толще, но 45 ГБ ОЗУ это переживут без вопросов.
-        LLM_REPO="Qwen/Qwen3-30B-A3B-Instruct-2507-GGUF"
+        # Сам Qwen кванты этой модели не публикует, GGUF собирают сторонние.
+        LLM_REPO="unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
+        LLM_REPO_ALT="bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF"
         LLM_FILE="Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
         STT_REPO="Systran/faster-whisper-small"
         ;;
@@ -355,6 +359,26 @@ print(paths[0])
 PY
 }
 
+try_fetch_llm_from() {
+    # Сначала точное имя, потом поиск по маске: имена квантов у разных
+    # публикаторов пляшут регистром и суффиксами (q4_K_M / Q4_K_M /
+    # -Q4_K_M-00001-of-00002), и промах в одну букву не повод сдаваться.
+    local repo="$1" found errors
+    hf_get_file "$repo" "$LLM_FILE" "models/llm" >/dev/null 2>&1 && return 0
+
+    errors="$(mktemp)"
+    if found="$(hf_get_by_pattern "$repo" "*q4_k_m*.gguf" "models/llm" 2>"$errors")" \
+        && [ -n "$found" ]; then
+        rm -f "$errors"
+        [ "$(basename "$found")" = "$LLM_FILE" ] || mv -f "$found" "models/llm/$LLM_FILE"
+        return 0
+    fi
+
+    warn "$repo: $(tail -1 "$errors" 2>/dev/null || echo 'файл не найден')"
+    rm -f "$errors"
+    return 1
+}
+
 fetch_llm() {
     local target="models/llm/$LLM_FILE"
     if [ "$FORCE" -eq 0 ] && [ -s "$target" ]; then
@@ -362,21 +386,19 @@ fetch_llm() {
         return
     fi
     mkdir -p models/llm
-    ok "качаю LLM $LLM_REPO (12–18 ГБ, это надолго)"
 
-    if ! hf_get_file "$LLM_REPO" "$LLM_FILE" "models/llm" >/dev/null 2>&1; then
-        # Имена квантов у разных публикаторов пляшут регистром и суффиксами
-        # (q4_K_M / Q4_K_M / -Q4_K_M-00001-of-00002). Промах в одну букву —
-        # не повод ронять установку целиком.
-        warn "точного имени $LLM_FILE в репозитории нет, ищу по маске"
-        local found
-        found="$(hf_get_by_pattern "$LLM_REPO" "*q4_k_m*.gguf" "models/llm")" \
-            || die "не удалось скачать GGUF из $LLM_REPO"
-        [ "$(basename "$found")" = "$LLM_FILE" ] || mv -f "$found" "$target"
-    fi
+    local repo
+    for repo in "$LLM_REPO" ${LLM_REPO_ALT:+"$LLM_REPO_ALT"}; do
+        ok "качаю LLM $repo (12–18 ГБ, это надолго)"
+        if try_fetch_llm_from "$repo"; then
+            [ -s "$target" ] || die "GGUF не скачался: $target"
+            ok "LLM: $target ($(du -h "$target" 2>/dev/null | cut -f1))"
+            return
+        fi
+    done
 
-    [ -s "$target" ] || die "GGUF не скачался: $target"
-    ok "LLM: $target ($(du -h "$target" 2>/dev/null | cut -f1))"
+    die "не удалось скачать $LLM_FILE ни из одного репозитория.
+       Проверьте имя на huggingface.co и поправьте LLM_REPO в $0"
 }
 
 fetch_stt() {
