@@ -12,6 +12,10 @@
 Нормализация — только для сравнения. Наружу уходит исходный текст с вырезанным
 именем: LLM и поиск музыки должны получить «Расскажи анекдот про кота!», а не
 «расскажи анекдот про кота».
+
+Имя может стоять где угодно: «Башмак, включи дору», «включи дору, Башмак»,
+«включи дору, Башмак, пожалуйста». Поэтому вырезаются все его вхождения, а
+остаток склеивается обратно, — а не берётся «всё после имени».
 """
 
 from __future__ import annotations
@@ -61,8 +65,7 @@ class WakeWordFilter:
         # Ищем по исходной строке, сравниваем по нормализованным словам: так
         # известны позиции, и запрос можно вырезать как есть, без потери
         # регистра и пунктуации.
-        best: re.Match[str] | None = None
-        best_score = 0.0
+        hits: list[tuple[re.Match[str], float]] = []
 
         for found in _WORD.finditer(text):
             word = normalize(found.group(0))
@@ -70,20 +73,39 @@ class WakeWordFilter:
             if len(word) < 4:
                 continue
             score = max(fuzz.ratio(word, variant) for variant in self.variants)
-            if score > best_score:
-                best_score, best = score, found
+            if score >= self.threshold:
+                hits.append((found, score))
 
-        if best is None or best_score < self.threshold:
+        if not hits:
             return None
 
-        if self.strip_prefix:
-            # Слева срезаем пунктуацию («Башмак, привет» → «привет»), справа
-            # только пробелы: «!» и «?» в конце запроса — часть фразы.
-            payload = text[best.end() :].lstrip(_EDGE).rstrip()
-            # «Башмак!» без продолжения — тоже обращение, пусть отзовётся.
-            if not payload:
-                payload = text[: best.start()].strip(_EDGE)
-        else:
-            payload = text.strip()
+        # Наружу отдаём лучшее совпадение: на нём висит отладка «как имя
+        # прозвучало на самом деле».
+        best, best_score = max(hits, key=lambda hit: hit[1])
 
+        payload = self._strip_name(text, hits) if self.strip_prefix else text.strip()
         return WakeMatch(payload=_SPACES.sub(" ", payload), score=best_score, word=best.group(0))
+
+    @staticmethod
+    def _strip_name(text: str, hits: list[tuple[re.Match[str], float]]) -> str:
+        """Вырезать все вхождения имени и склеить остаток фразы.
+
+        Имя — обращение, а не начало команды: оно бывает и в конце («включи
+        дору, Башмак»), и в середине («включи дору, Башмак, пожалуйста»), и
+        дважды за фразу. Поэтому берём не «всё после имени», а всё, кроме
+        самого имени, — иначе половина запроса молча теряется.
+        """
+        pieces: list[str] = []
+        cursor = 0
+        for found, _ in hits:
+            pieces.append(text[cursor : found.start()])
+            cursor = found.end()
+        pieces.append(text[cursor:])
+
+        # У всех кусков, кроме последнего, срезаем пунктуацию с обеих сторон:
+        # иначе на стыке вырезанного имени получится «дору, , пожалуйста».
+        parts = [piece.strip(_EDGE) for piece in pieces[:-1]]
+        # А у последнего правый край не трогаем: «!» и «?» в конце — часть
+        # фразы, и модель по ним слышит интонацию.
+        parts.append(pieces[-1].lstrip(_EDGE).rstrip())
+        return ", ".join(part for part in parts if part)

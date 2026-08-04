@@ -36,13 +36,34 @@ def wake():
         # Whisper регулярно слышит имя со склонением или с ошибкой.
         ("бошмак, привет", "привет"),
         ("Башмака попроси включить трек", "попроси включить трек"),
-        ("эй башмачок сделай потише", "сделай потише"),
+        # «эй» остаётся: вырезаем имя, а не всё, что стоит перед ним.
+        ("эй башмачок сделай потише", "эй, сделай потише"),
+        # Имя в конце — обращение после запроса.
+        ("Привет, Башмак", "Привет"),
+        ("Включи дору, Башмак", "Включи дору"),
+        ("Включи Кино, башмачок", "Включи Кино"),
     ],
 )
 def test_wake_word_found(wake, text, payload):
     match = wake.match(text)
     assert match is not None
     assert match.payload == payload
+
+
+def test_name_in_the_middle_keeps_both_sides(wake):
+    """Раньше всё до имени выбрасывалось, и запрос терялся целиком."""
+    match = wake.match("Включи дору Башмак пожалуйста")
+
+    assert match is not None
+    assert match.payload == "Включи дору, пожалуйста"
+
+
+def test_every_occurrence_of_the_name_is_cut_out(wake):
+    """Второе имя не должно уехать в модель как часть вопроса."""
+    match = wake.match("Башмак, привет, Башмак")
+
+    assert match is not None
+    assert match.payload == "привет"
 
 
 @pytest.mark.parametrize(
