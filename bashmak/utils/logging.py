@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import functools
+import json
 import logging
 import logging.handlers
 import re
@@ -105,6 +106,45 @@ _recent: deque[dict[str, float]] = deque(maxlen=_RECENT_TURNS)
 log = logging.getLogger("bashmak.turn")
 
 
+#: Метрики реплик для монитора (bashmak/monitor.py). Отдельным файлом и в
+#: JSON, а не разбором основного лога: монитор — другой процесс, и парсить
+#: обратно то, что мы только что красиво отформатировали, — гиблое дело.
+METRICS_NAME = "turns.jsonl"
+
+_metrics = logging.getLogger("bashmak.metrics")
+
+
+def metrics_path(cfg: Any = None) -> Path:
+    """Где лежит файл метрик. Рядом с основным логом."""
+    default = Path(__file__).resolve().parent.parent.parent / "logs" / METRICS_NAME
+    if cfg is None:
+        return default
+    section = cfg.get("logging") if hasattr(cfg, "get") else None
+    if section is None or "file" not in section:
+        return default
+    return section.path("file").with_name(METRICS_NAME)
+
+
+def _setup_metrics(log_file: Path | None, max_bytes: int, backups: int) -> None:
+    """Отдельный логгер под метрики: одна JSON-строка на реплику."""
+    _metrics.propagate = False
+    _metrics.setLevel(logging.INFO)
+    for existing in list(_metrics.handlers):
+        _metrics.removeHandler(existing)
+    if log_file is None:
+        return
+    try:
+        path = log_file.with_name(METRICS_NAME)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handler = logging.handlers.RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=min(backups, 2), encoding="utf-8"
+        )
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        _metrics.addHandler(handler)
+    except OSError as exc:
+        logging.getLogger().warning("не удалось открыть файл метрик: %s", exc)
+
+
 def _turn() -> _Turn:
     cid = current_cid.get()
     turn = _open_turns.get(cid)
@@ -161,6 +201,20 @@ def turn_report() -> None:
     log.info("\n".join(lines))
     if turn.stages:
         _recent.append({**turn.stages, "всего": total})
+        _metrics.info(
+            json.dumps(
+                {
+                    "at": time.time(),
+                    "speaker": turn.speaker,
+                    "heard": turn.heard,
+                    "sent": turn.sent,
+                    "reply": turn.reply,
+                    "stages": dict(turn.stages),
+                    "total": round(total, 3),
+                },
+                ensure_ascii=False,
+            )
+        )
 
 
 def stage_summary(width: int = 20) -> list[str]:
@@ -232,6 +286,8 @@ def setup_logging(cfg: Any = None) -> None:
             root.addHandler(file_handler)
         except OSError as exc:
             root.warning("не удалось открыть лог-файл %s: %s (пишу только в консоль)", log_file, exc)
+
+    _setup_metrics(log_file, max_bytes, backups)
 
     # Эти двое очень болтливы на DEBUG и топят полезное.
     logging.getLogger("discord").setLevel(max(level, logging.WARNING))

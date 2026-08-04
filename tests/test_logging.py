@@ -78,6 +78,37 @@ def test_summary_shows_a_bar_per_stage():
     assert "█" in summary
 
 
+def test_metrics_line_is_readable_by_the_monitor(tmp_path, monkeypatch):
+    """Стык бота и монитора: что записали, то он и должен разобрать."""
+    from bashmak import monitor
+
+    path = tmp_path / "turns.jsonl"
+    blog._setup_metrics(tmp_path / "bashmak.log", 1_000_000, 2)
+    monkeypatch.setattr(blog, "METRICS_NAME", "turns.jsonl")
+
+    _record_stages(stt=0.5, llm=2.0)
+    blog.turn_note(speaker="балбес", heard="иди нахуй", reply="сам иди")
+    blog.turn_report()
+    for handler in blog._metrics.handlers:
+        handler.flush()
+
+    turns = monitor.read_turns(path)
+
+    assert len(turns) == 1
+    assert turns[0]["speaker"] == "балбес"
+    assert turns[0]["stages"]["llm"] == pytest.approx(2.0)
+    # total — это настоящее время жизни реплики; в тесте оно микросекундное.
+    assert turns[0]["total"] >= 0
+
+
+def test_metrics_without_a_log_file_do_not_crash():
+    blog._setup_metrics(None, 1_000_000, 2)
+    _record_stages(stt=0.1)
+    blog.turn_note(speaker="Вася", heard="привет")
+
+    blog.turn_report()  # писать некуда — и не надо
+
+
 def test_summary_says_when_there_is_nothing_yet():
     assert blog.stage_summary() == ["замеров пока нет"]
 
