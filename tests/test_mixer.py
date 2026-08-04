@@ -202,6 +202,48 @@ class FakeConfig:
     music = _Music()
 
 
+def test_interrupt_stops_synthesis_mid_reply(loop):
+    """«Завали ебало» посреди ответа: остаток даже не должен синтезироваться.
+
+    Чистки буфера мало — без сдвига поколения цикл speak() дотянул бы из
+    генератора все оставшиеся предложения и они бы зазвучали.
+    """
+    out = OutputArbiter(FakeConfig(), loop)
+    synthesized = []
+
+    async def chunks():
+        for index in range(5):
+            synthesized.append(index)
+            if index == 0:
+                out.interrupt()
+            yield np.full(480, 1000, dtype="<i2").tobytes(), 48000
+
+    loop.run_until_complete(asyncio.wait_for(out.speak(chunks()), 5.0))
+
+    assert synthesized == [0], "после «заткнись» следующие куски тянуть незачем"
+    assert not out.source.speaking
+
+
+def test_speak_recovers_after_interrupt(loop, monkeypatch):
+    """Сдвинутое поколение глушит одну реплику, а не все последующие."""
+    monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)
+    out = OutputArbiter(FakeConfig(), loop)
+    consumed = []
+
+    async def interrupted():
+        out.interrupt()
+        yield np.full(480, 1000, dtype="<i2").tobytes(), 48000
+
+    async def normal():
+        consumed.append("кусок")
+        yield np.full(480, 1000, dtype="<i2").tobytes(), 48000
+
+    loop.run_until_complete(asyncio.wait_for(out.speak(interrupted()), 5.0))
+    loop.run_until_complete(asyncio.wait_for(out.speak(normal()), 5.0))
+
+    assert consumed == ["кусок"], "следующая реплика обязана озвучиться как обычно"
+
+
 def test_speak_gives_up_when_player_is_dead(loop, monkeypatch):
     """Голосовое соединение отвалилось — speak() обязан отпустить очередь LLM."""
     monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)

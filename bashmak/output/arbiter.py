@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import threading
 from typing import AsyncIterator, Callable
@@ -255,6 +256,10 @@ class OutputArbiter:
         )
         # Бот говорит одним голосом: две реплики одновременно смешались бы в кашу.
         self._lock = asyncio.Lock()
+        # Поколение реплики. interrupt() его сдвигает, speak() это замечает и
+        # бросает свою реплику — иначе чистка буфера только пропустила бы
+        # предложение, а следующее всё равно досинтезировалось бы и зазвучало.
+        self._epoch = 0
 
     def bind_music_end(self, callback: Callable[[discord.AudioSource], None]) -> None:
         self.source._on_music_end = callback
@@ -262,23 +267,30 @@ class OutputArbiter:
     async def speak(self, chunks: AsyncIterator[tuple[bytes, int]]) -> None:
         """Проиграть поток кусков TTS и дождаться, пока всё прозвучит."""
         async with self._lock:
+            epoch = self._epoch
             pushed = 0
             # Один ресемплер на реплику: покадровый stateless-пересчёт даёт
             # щелчки на стыках предложений.
             resampler: StreamResampler | None = None
 
-            async for pcm, rate in chunks:
-                if resampler is None or resampler.in_rate != rate:
-                    if resampler is not None:
-                        pushed += self._push(resampler.flush())
-                    resampler = StreamResampler(rate, DISCORD_RATE)
-                mono = to_float_mono(np.frombuffer(pcm, dtype="<i2"))
-                pushed += self._push(resampler.process(mono))
+            # aclosing, а не голый async for: при выходе из цикла на середине
+            # генератор надо закрыть явно, иначе он останется висеть до GC.
+            async with contextlib.aclosing(chunks) as stream:
+                async for pcm, rate in stream:
+                    if self._epoch != epoch:
+                        log.info("реплику оборвали — остаток не озвучиваю")
+                        return
+                    if resampler is None or resampler.in_rate != rate:
+                        if resampler is not None:
+                            pushed += self._push(resampler.flush())
+                        resampler = StreamResampler(rate, DISCORD_RATE)
+                    mono = to_float_mono(np.frombuffer(pcm, dtype="<i2"))
+                    pushed += self._push(resampler.process(mono))
 
             if resampler is not None:
                 pushed += self._push(resampler.flush())
 
-            if not pushed:
+            if not pushed or self._epoch != epoch:
                 return
 
             # Ждать событие без таймаута нельзя: его выставляет поток плеера, а
@@ -305,5 +317,11 @@ class OutputArbiter:
         return len(data)
 
     def interrupt(self) -> None:
-        """Заткнуться немедленно (например, при выходе из канала)."""
+        """Заткнуться немедленно: и то, что звучит, и то, что ещё синтезируется.
+
+        Зовётся не из лупа арбитра, а из обработки чужой реплики («завали
+        ебало») и из закрытия сессии. Ждать тут нечего: сдвиг счётчика —
+        обычное присваивание, а буфер чистится под своим локом.
+        """
+        self._epoch += 1
         self.source.clear_tts()

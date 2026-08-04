@@ -9,8 +9,13 @@
 пролежавшие дольше ``stale_task_s``, выбрасываются — отвечать через минуту
 на «что там по погоде» уже незачем.
 
-Истории между запросами нет: каждая реплика уходит в модель одна (см.
-persona.py). Хранить тут нечего, поэтому очередь без состояния.
+История короткая и общая на голосовой канал: люди в нём разговаривают с одним
+Башмаком и подхватывают чужие вопросы. Держим её здесь, а не в persona.py:
+сборка промпта остаётся без состояния. Глубина маленькая намеренно — на CPU
+длинный контекст разбавляет вопрос, и модель начинает отвечать на фон.
+
+``drop(channel_id)`` — «завали ебало»: всё, что ещё не прозвучало в канале,
+выбрасывается вместе с историей.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -50,10 +56,18 @@ class LlmQueue:
         self._client = client
         self._on_reply = on_reply
         self._stale_after = float(cfg.get("stale_task_s", 45))
+        #: Сколько обменов (вопрос + ответ) помнить в канале.
+        self._history_turns = int(cfg.get("history_turns", 3))
+        self._history_ttl = float(cfg.get("history_ttl_s", 120))
 
         self._queue: asyncio.PriorityQueue[ChatTask] = asyncio.PriorityQueue()
         self._task: asyncio.Task | None = None
-        self._deliveries: set[asyncio.Task] = set()
+        #: Задача озвучки → канал, чтобы drop() гасил только свой канал.
+        self._deliveries: dict[asyncio.Task, int] = {}
+        self._history: dict[int, deque[dict[str, str]]] = {}
+        self._history_at: dict[int, float] = {}
+        #: Канал → момент «замолчи». Всё, что договорили до него, не отвечаем.
+        self._muted: dict[int, float] = {}
 
     # ------------------------------------------------------------- жизнь --
     def start(self) -> None:
@@ -87,6 +101,46 @@ class LlmQueue:
     def depth(self) -> int:
         return self._queue.qsize()
 
+    def drop(self, channel_id: int) -> None:
+        """Забыть всё, что ещё не прозвучало в канале, и обнулить контекст.
+
+        Отсечка по времени, а не только отмена задач: реплика может быть прямо
+        сейчас в инференсе, и оборвать HTTP-запрос дешевле не выйдет — зато
+        готовый ответ на неё уже никому не нужен.
+        """
+        self._muted[channel_id] = time.monotonic()
+        for delivery, channel in list(self._deliveries.items()):
+            if channel == channel_id:
+                delivery.cancel()
+        self._history.pop(channel_id, None)
+        self._history_at.pop(channel_id, None)
+
+    # ---------------------------------------------------------- история ---
+    def _history_for(self, channel_id: int) -> deque[dict[str, str]]:
+        """Контекст канала. Протухший по времени — пустой."""
+        history = self._history.get(channel_id)
+        if history is None:
+            # Пары user+assistant, поэтому длина вдвое больше числа обменов.
+            history = deque(maxlen=max(0, self._history_turns) * 2)
+            self._history[channel_id] = history
+        last = self._history_at.get(channel_id)
+        # Нестрого, чтобы history_ttl_s: 0 означало «без истории вовсе».
+        if last is not None and time.monotonic() - last >= self._history_ttl:
+            log.debug("контекст канала %s протух, начинаю разговор заново", channel_id)
+            history.clear()
+        return history
+
+    def _muted_for(self, task: ChatTask) -> bool:
+        """Успели сказать «заткнись» после того, как человек договорил?
+
+        Сравнение нестрогое: шаг monotonic() кое-где доходит до 16 мс, и
+        «заткнись» запросто попадает в тот же тик, что и реплика, которую оно
+        отменяет. Новую реплику в этот зазор не втиснуть — до неё минимум
+        min_speech_ms речи, silence_ms тишины и целое распознавание.
+        """
+        muted_at = self._muted.get(task.channel_id)
+        return muted_at is not None and muted_at >= task.ended_at
+
     # ------------------------------------------------------------ работа --
     @guard("очередь LLM", reraise=False)
     async def _run(self) -> None:
@@ -97,6 +151,9 @@ class LlmQueue:
                 age = time.monotonic() - task.ended_at
                 if age > self._stale_after:
                     log.warning("реплика протухла (%.0f с в очереди), выброшена: %r", age, task.text)
+                    continue
+                if self._muted_for(task):
+                    log.info("велели молчать — реплика из очереди выброшена: %r", task.text)
                     continue
                 await self._handle(task)
             except Exception:
@@ -109,30 +166,53 @@ class LlmQueue:
         # быть видно, что именно ей отправляли.
         turn_note(sent=f"{task.speaker}: {task.text}")
 
-        with stage(log, "llm", queue=self._queue.qsize()) as info:
-            raw = await self._client.complete(build_messages(task.speaker, task.text))
+        history = self._history_for(task.channel_id)
+        with stage(log, "llm", queue=self._queue.qsize(), контекст=len(history)) as info:
+            raw = await self._client.complete(
+                build_messages(task.speaker, task.text, history)
+            )
             info["chars"] = len(raw)
+
+        if self._muted_for(task):
+            # Велели молчать, пока модель думала. Ответ не озвучиваем и в
+            # историю не пишем — разговора, к которому он относится, уже нет.
+            log.info("велели молчать — готовый ответ выброшен: %r", raw)
+            return
 
         reply = clean_reply(raw)
         if reply != raw:
-            # Не мелочь: значит, модель пошла дописывать диалог за собеседника,
-            # и в голосовой канал уехала бы выдуманная беседа целиком.
-            log.warning("в ответе была чужая разметка, обрезал: %r", raw)
+            # Модель либо пошла дописывать диалог за собеседника (и тогда в
+            # канал уехала бы выдуманная беседа целиком), либо не удержалась в
+            # одном предложении. Второе — рутина, шуметь про него незачем.
+            log.debug("ответ обрезан: %r", raw)
         if not reply:
             log.warning("LLM вернула пустой ответ на %r", task.text)
             return
 
         turn_note(reply=reply)
 
+        # Обе реплики разом и только после удачного ответа: пустой или
+        # оборванный ход сломал бы чередование user/assistant, которое
+        # проверяет LlmClient._check_roles. В историю кладём то, что реально
+        # прозвучит, — то есть уже обрезанный ответ.
+        history.append({"role": "user", "content": task.text})
+        history.append({"role": "assistant", "content": reply})
+        self._history_at[task.channel_id] = time.monotonic()
+
         # Озвучка идёт отдельным таском: ждать её здесь значило бы держать
         # очередь простаивающей всё время проигрывания (ответ на 15 секунд —
         # 15 секунд простоя), а stale_task_s тем временем выбрасывал бы уже
         # распознанные реплики. Порядок реплик держит лок арбитра.
         delivery = asyncio.create_task(self._deliver(task, reply), name="llm-reply")
-        self._deliveries.add(delivery)
-        delivery.add_done_callback(self._deliveries.discard)
+        self._deliveries[delivery] = task.channel_id
+        delivery.add_done_callback(lambda done: self._deliveries.pop(done, None))
 
     async def _deliver(self, task: ChatTask, reply: str) -> None:
+        # Ещё одна проверка: «заткнись» могло прилететь, пока задача ждала
+        # своей очереди на озвучку за чужой репликой (лок арбитра).
+        if self._muted_for(task):
+            log.debug("велели молчать — ответ до озвучки не доехал: %r", reply)
+            return
         try:
             await self._on_reply(task, reply)
         except asyncio.CancelledError:

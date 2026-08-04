@@ -27,6 +27,8 @@ log = logging.getLogger(__name__)
 
 class Intent(str, Enum):
     CHAT = "chat"
+    #: «Завали ебало» — замолчать и вырубить музыку, вслух не отвечая.
+    SILENCE = "silence"
     MUSIC_PLAY = "music_play"
     MUSIC_PAUSE = "music_pause"
     MUSIC_RESUME = "music_resume"
@@ -44,9 +46,23 @@ class Decision:
 
 
 # Порядок важен: «выключи музыку» должно поймать stop, а не play по «включ».
+#
+# Про подбор слов для SILENCE. «Тише»/«потише» не берём — это громкость
+# («сделай потише»). Голое «хватит» не берём — оно занято правилом ниже
+# («хватит музыки»). А «заглохни» и «тишина» переехали сюда из music_stop: по
+# смыслу это «замолчи», а не «сними трек», — и музыку silence всё равно снимает.
 _RULES: tuple[tuple[Intent, re.Pattern[str]], ...] = (
+    (
+        Intent.SILENCE,
+        re.compile(
+            # Только повелительные формы: «завалил экзамен» и «молчание» —
+            # обычная речь, а не команда.
+            r"\b(завали|заткн\w*|захлопни|заглохни|тишина|уймись|замолкни"
+            r"|(?:за|по)?молчи|молчать|стоп"
+            r"|не пизди|хорош пиздеть|хватит (?:болтать|говорить|трещать))\b"
+        ),
+    ),
     (Intent.MUSIC_STOP, re.compile(r"\b(выключ\w*|останов\w*|стоп|прекрат\w*|хватит)\b.*\b(музык\w*|трек\w*|песн\w*|плейлист\w*)")),
-    (Intent.MUSIC_STOP, re.compile(r"\b(выключи музыку|заглохни|тишина)\b")),
     (Intent.MUSIC_PAUSE, re.compile(r"\b(пауз\w*|приостанов\w*|погоди с музык\w*)\b")),
     (Intent.MUSIC_RESUME, re.compile(r"\b(продолж\w*|возобнов\w*|снова играй|с паузы)\b")),
     (Intent.MUSIC_SKIP, re.compile(r"\b(следующ\w*|дальше|скип\w*|пропусти|переключ\w*|другую песн\w*|другой трек)\b")),
@@ -90,10 +106,11 @@ _JSON_BLOB = re.compile(r"\{.*?\}", re.DOTALL)
 _CLASSIFIER_SYSTEM = (
     "Ты классификатор намерений голосового бота. Определи, чего хочет человек. "
     "Ответь ТОЛЬКО одним JSON-объектом без пояснений.\n"
-    'Формат: {"intent": "<одно из: chat, music_play, music_pause, music_resume, '
+    'Формат: {"intent": "<одно из: chat, silence, music_play, music_pause, music_resume, '
     'music_skip, music_stop, music_louder, music_quieter>", "query": "<название трека '
     'или пустая строка>"}\n'
-    'Если человек просто разговаривает — {"intent": "chat", "query": ""}.'
+    'Если человек просто разговаривает — {"intent": "chat", "query": ""}.\n'
+    'Если человека просят заткнуться и замолчать — {"intent": "silence", "query": ""}.'
 )
 
 _SCHEMA = {

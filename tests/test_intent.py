@@ -73,6 +73,49 @@ def test_chat_falls_through_rules(text):
     assert classify_by_rules(text) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "завали ебало",
+        "завали хлебало",
+        "заткнись",
+        "заткни ебало",
+        "замолчи",
+        "помолчи",
+        "молчать",
+        "заглохни",
+        "тишина",
+        "уймись",
+        "стоп",
+        "хватит болтать",
+    ],
+)
+@pytest.mark.parametrize("music_playing", [False, True])
+def test_silence_is_caught_with_or_without_music(text, music_playing):
+    """Заткнуться бот обязан и когда музыки нет — это команда не плееру."""
+    decision = classify_by_rules(text, music_playing=music_playing)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is Intent.SILENCE
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Соседи по смыслу, которые новое правило не должно съесть.
+        "сделай потише",
+        "выключи музыку",
+        "останови музыку",
+        "поставь музыку на паузу",
+        # Обычная речь с похожими корнями.
+        "я завалил экзамен",
+        "что такое молчание",
+    ],
+)
+def test_silence_does_not_eat_neighbours(text):
+    decision = classify_by_rules(text, music_playing=True)
+    assert decision is None or decision.intent is not Intent.SILENCE
+
+
 def test_stop_wins_over_play():
     """«выключи музыку» содержит и «ключ», и «музык» — важен порядок правил."""
     decision = classify_by_rules("выключи музыку пожалуйста")

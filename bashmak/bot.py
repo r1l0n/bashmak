@@ -89,6 +89,9 @@ class GuildSession:
 
     async def close(self) -> None:
         self.arbiter.interrupt()
+        # Заодно снимает всё, что ещё считается для этого канала: озвучивать
+        # это будет уже некому, а контекст закрытой сессии переживать не должен.
+        self.bot.llm_queue.drop(self.channel_id)
         self.player.shutdown()
         await self.listener.stop()
 
@@ -121,6 +124,19 @@ class GuildSession:
         user = self.bot.get_user(user_id)
         return user.display_name if user is not None else f"user{user_id}"
 
+    def silence(self) -> None:
+        """«Завали ебало»: замолчать и вырубить музыку, ничего не отвечая.
+
+        Три источника звука гасятся по отдельности: то, что уже звучит
+        (арбитр), то, что ещё считается или стоит в очереди (очередь LLM), и
+        музыка. Ответ плеера («Выключил музыку») сознательно выбрасываем —
+        команда замолчать не может кончаться репликой.
+        """
+        self.arbiter.interrupt()
+        self.bot.llm_queue.drop(self.channel_id)
+        self.player.stop()
+        log.info("велели молчать — заткнулся и снял музыку")
+
     async def say(self, text: str) -> None:
         """Озвучить фразу и дождаться, пока она прозвучит."""
         try:
@@ -150,6 +166,14 @@ class GuildSession:
                 match.payload,
                 music_playing=self.player.current is not None,
             )
+
+        if decision.intent is Intent.SILENCE:
+            self.silence()
+            turn_note(sent=f"команда {decision.intent.value}", reply="(молчу)")
+            # say() не будет, а отчёт закрывается именно там — иначе реплика
+            # осталась бы висеть открытой.
+            turn_report()
+            return
 
         if decision.intent is Intent.CHAT:
             await self.bot.llm_queue.submit(
