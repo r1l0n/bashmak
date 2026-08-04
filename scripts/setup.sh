@@ -7,7 +7,8 @@
 # Скрипт идемпотентный: повторный запуск ничего не ломает и не перекачивает.
 #
 #   ./scripts/setup.sh                      # всё, профиль balanced
-#   ./scripts/setup.sh --profile fast       # модели полегче
+#   ./scripts/setup.sh --profile qwen       # Qwen3-30B вместо GigaChat
+#   ./scripts/setup.sh --profile quality    # STT покрупнее (whisper medium)
 #   ./scripts/setup.sh --skip-models        # только окружение
 #   ./scripts/setup.sh --models-only        # только докачать модели
 #   ./scripts/setup.sh --systemd            # + установить и включить юниты
@@ -66,13 +67,29 @@ done
 # весов на каждый токен считаются ~3 млрд. По скорости это уровень трёх-
 # миллиардной модели, по качеству — куда выше, а русский у неё родной, а не
 # переведённый. Профиль теперь выбирает только STT.
-LLM_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
-LLM_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
+GIGACHAT_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
+GIGACHAT_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
 
 case "$PROFILE" in
-    fast|balanced) STT_REPO="Systran/faster-whisper-small" ;;
-    quality)       STT_REPO="Systran/faster-whisper-medium" ;;
-    *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality)" ;;
+    fast|balanced)
+        LLM_REPO="$GIGACHAT_REPO"; LLM_FILE="$GIGACHAT_FILE"
+        STT_REPO="Systran/faster-whisper-small"
+        ;;
+    quality)
+        LLM_REPO="$GIGACHAT_REPO"; LLM_FILE="$GIGACHAT_FILE"
+        STT_REPO="Systran/faster-whisper-medium"
+        ;;
+    qwen)
+        # Тоже MoE с ~3 млрд активных весов, то есть по скорости примерно как
+        # GigaChat. Разница в другом: шире общие знания и логика, но русский
+        # «выученный», а не родной — токенизатор режет его расточительнее, и
+        # прирост в словах за секунду меньше, чем кажется по tok/s.
+        # Файл вдвое толще, но 45 ГБ ОЗУ это переживут без вопросов.
+        LLM_REPO="Qwen/Qwen3-30B-A3B-Instruct-2507-GGUF"
+        LLM_FILE="Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
+        STT_REPO="Systran/faster-whisper-small"
+        ;;
+    *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality | qwen)" ;;
 esac
 
 STT_DIR="models/stt/$(basename "$STT_REPO")"
@@ -315,6 +332,29 @@ print(snapshot_download(
 PY
 }
 
+hf_get_by_pattern() {
+    # repo, маска, dest — когда точное имя файла в репозитории не угадали
+    "$PY" - "$1" "$2" "$3" <<'PY'
+import fnmatch
+import sys
+
+from huggingface_hub import hf_hub_download, list_repo_files
+
+repo, pattern, dest = sys.argv[1:4]
+files = sorted(f for f in list_repo_files(repo) if fnmatch.fnmatch(f.lower(), pattern.lower()))
+if not files:
+    raise SystemExit(f"в {repo} нет файлов по маске {pattern}")
+
+# Крупные кванты часто разложены по шардам (-00001-of-0000N). Целый файл
+# предпочтительнее; если только шарды — качаем все, llama.cpp подхватит
+# остальные части по первой.
+plain = [f for f in files if "-of-" not in f]
+chosen = [plain[0]] if plain else files
+paths = [hf_hub_download(repo_id=repo, filename=f, local_dir=dest) for f in chosen]
+print(paths[0])
+PY
+}
+
 fetch_llm() {
     local target="models/llm/$LLM_FILE"
     if [ "$FORCE" -eq 0 ] && [ -s "$target" ]; then
@@ -322,9 +362,19 @@ fetch_llm() {
         return
     fi
     mkdir -p models/llm
-    ok "качаю LLM $LLM_REPO / $LLM_FILE (12 ГБ, это надолго)"
-    hf_get_file "$LLM_REPO" "$LLM_FILE" "models/llm" >/dev/null \
-        || die "не удалось скачать $LLM_FILE из $LLM_REPO"
+    ok "качаю LLM $LLM_REPO (12–18 ГБ, это надолго)"
+
+    if ! hf_get_file "$LLM_REPO" "$LLM_FILE" "models/llm" >/dev/null 2>&1; then
+        # Имена квантов у разных публикаторов пляшут регистром и суффиксами
+        # (q4_K_M / Q4_K_M / -Q4_K_M-00001-of-00002). Промах в одну букву —
+        # не повод ронять установку целиком.
+        warn "точного имени $LLM_FILE в репозитории нет, ищу по маске"
+        local found
+        found="$(hf_get_by_pattern "$LLM_REPO" "*q4_k_m*.gguf" "models/llm")" \
+            || die "не удалось скачать GGUF из $LLM_REPO"
+        [ "$(basename "$found")" = "$LLM_FILE" ] || mv -f "$found" "$target"
+    fi
+
     [ -s "$target" ] || die "GGUF не скачался: $target"
     ok "LLM: $target ($(du -h "$target" 2>/dev/null | cut -f1))"
 }

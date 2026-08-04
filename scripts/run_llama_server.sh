@@ -27,6 +27,7 @@ for key, value in (
     ("MODEL",   llm.get("model_path", "")),
     ("THREADS", llm.get("threads", 4)),
     ("CTX",     llm.get("context_size", 4096)),
+    ("MLOCK",   "1" if llm.get("mlock") else ""),
     ("HOST",    url.hostname or "127.0.0.1"),
     ("PORT",    url.port or 8080),
 ):
@@ -46,9 +47,16 @@ BIN="$(find "$ROOT/vendor" -type f -name llama-server -perm -u+x 2>/dev/null | h
 BINDIR="$(dirname "$BIN")"
 export LD_LIBRARY_PATH="$BINDIR:$BINDIR/../lib:${LD_LIBRARY_PATH:-}"
 
+EXTRA=()
+if [ -n "$MLOCK" ]; then
+    # Веса остаются в памяти и не вытесняются под page cache. Требует
+    # LimitMEMLOCK=infinity в юните — он это уже задаёт.
+    EXTRA+=(--mlock)
+fi
+
 echo "llama-server: $BIN"
 echo "  модель:  $MODEL"
-echo "  потоки:  $THREADS, контекст: $CTX"
+echo "  потоки:  $THREADS, контекст: $CTX${MLOCK:+, mlock}"
 echo "  адрес:   http://$HOST:$PORT"
 
 # Флаги намеренно только самые стабильные: сборка llama.cpp обновляется
@@ -62,4 +70,5 @@ exec "$BIN" \
     --port "$PORT" \
     --threads "$THREADS" \
     --ctx-size "$CTX" \
-    --parallel 1
+    --parallel 1 \
+    "${EXTRA[@]}"

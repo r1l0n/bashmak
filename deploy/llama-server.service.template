@@ -12,6 +12,9 @@ Restart=always
 RestartSec=5
 # Модель грузится в память минуты — не убивать раньше времени.
 TimeoutStartSec=300
+# Нужно для --mlock (llm.mlock в config.yaml): без снятия лимита ядро не даст
+# закрепить 12–18 ГБ весов в памяти, и сервер упадёт на старте.
+LimitMEMLOCK=infinity
 KillSignal=SIGINT
 StandardOutput=journal
 StandardError=journal
