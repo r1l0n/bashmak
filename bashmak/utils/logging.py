@@ -86,7 +86,9 @@ _RECENT_TURNS = 200
 #: Стадии tts приходят по кускам (tts[0], tts[1], ...) — в отчёте это одна.
 _STAGE_INDEX = re.compile(r"\[\d+\]$")
 
-_STAGE_TITLES = {"stt": "stt", "intent": "intent", "intent-llm": "intent", "llm": "llm", "tts": "tts"}
+#: intent-llm — тот же шаг разбора намерения, только через модель; в отчёте
+#: это одна строка «intent», а не две.
+_STAGE_TITLES = {"intent-llm": "intent"}
 
 
 @dataclass

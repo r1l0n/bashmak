@@ -31,6 +31,7 @@ from ..audio.resample import (
     float_mono_to_discord_pcm,
     to_float_mono,
 )
+from ..utils.logging import stage
 
 log = logging.getLogger(__name__)
 
@@ -285,7 +286,11 @@ class OutputArbiter:
             # и вся очередь LLM встала бы намертво до рестарта процесса.
             timeout = pushed / BYTES_PER_SECOND + SPEAK_TIMEOUT_SLACK
             try:
-                await asyncio.wait_for(self.source.drained.wait(), timeout)
+                # Отдельной стадией: это самый долгий кусок реплики (сколько
+                # длится сама фраза), и без него разбивка не сходится с
+                # «всего» — в отчёте казалось бы, что время ушло в никуда.
+                with stage(log, "речь", сек=f"{pushed / BYTES_PER_SECOND:.1f}"):
+                    await asyncio.wait_for(self.source.drained.wait(), timeout)
             except asyncio.TimeoutError:
                 log.warning(
                     "речь не доиграла за %.0f с — голосовой выход не крутится, "

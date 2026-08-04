@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -42,7 +42,7 @@ TAIL_BYTES = 256 * 1024
 
 _SPARKS = "▁▂▃▄▅▆▇█"
 #: Порядок стадий в таблице — как они идут в пайплайне, а не как пришли.
-_STAGE_ORDER = ["stt", "intent", "llm", "tts", "всего"]
+_STAGE_ORDER = ["stt", "intent", "llm", "tts", "речь", "всего"]
 
 
 # --------------------------------------------------------------- данные ----
@@ -144,6 +144,21 @@ def parse_meminfo(text: str) -> tuple[float, float]:
     return (total - available) / to_gb, total / to_gb
 
 
+def parse_cpu_cores(text: str) -> list[tuple[float, float]]:
+    """(занятое, всего) по каждому ядру из /proc/stat."""
+    cores: list[tuple[float, float]] = []
+    for line in text.splitlines():
+        name, _, rest = line.partition(" ")
+        if not (name.startswith("cpu") and name[3:].isdigit()):
+            continue
+        values = [float(v) for v in rest.split()]
+        if len(values) < 5:
+            continue
+        total = sum(values)
+        cores.append((total - sum(values[3:5]), total))
+    return cores
+
+
 def parse_cpu_times(text: str) -> tuple[float, float]:
     """(занятое, всего) из первой строки /proc/stat."""
     for line in text.splitlines():
@@ -172,8 +187,8 @@ def _read(path: str) -> str:
         return ""
 
 
-def process_alive(needle: str) -> int | None:
-    """PID процесса, в командной строке которого встречается needle."""
+def find_process(needle: str) -> tuple[int, str] | None:
+    """(pid, командная строка) процесса, в аргументах которого встречается needle."""
     proc = Path("/proc")
     if not proc.is_dir():
         return None
@@ -181,34 +196,63 @@ def process_alive(needle: str) -> int | None:
         if not entry.name.isdigit():
             continue
         try:
-            cmdline = (entry / "cmdline").read_bytes().decode("utf-8", "replace")
+            raw = (entry / "cmdline").read_bytes()
         except OSError:
             continue
+        cmdline = raw.decode("utf-8", "replace").replace("\0", " ").strip()
         if needle in cmdline:
-            return int(entry.name)
+            return int(entry.name), cmdline
     return None
+
+
+def model_from_cmdline(cmdline: str) -> str:
+    """Имя модели из строки запуска llama-server.
+
+    Берём именно из процесса, а не из config.yaml: конфиг говорит, что бот
+    хотел, а cmdline — что на самом деле загружено. Разойтись они могут
+    запросто, если сервер не перезапускали после правки конфига.
+    """
+    parts = cmdline.split()
+    for index, part in enumerate(parts):
+        if part == "--model" and index + 1 < len(parts):
+            return Path(parts[index + 1]).stem
+        if part.startswith("--model="):
+            return Path(part.split("=", 1)[1]).stem
+    return "?"
 
 
 @dataclass
 class System:
     cpu: float = 0.0
+    cores: list[float] = field(default_factory=list)
     mem_used: float = 0.0
     mem_total: float = 0.0
     load: tuple[float, float, float] = (0.0, 0.0, 0.0)
     bot_pid: int | None = None
     llama_pid: int | None = None
+    model: str = "?"
 
 
 class SystemProbe:
     """Замеры /proc. Загрузка CPU считается между вызовами."""
 
     def __init__(self) -> None:
-        self._previous = parse_cpu_times(_read("/proc/stat"))
+        stat = _read("/proc/stat")
+        self._previous = parse_cpu_times(stat)
+        self._previous_cores = parse_cpu_cores(stat)
 
     def sample(self) -> System:
-        current = parse_cpu_times(_read("/proc/stat"))
+        stat = _read("/proc/stat")
+        current = parse_cpu_times(stat)
         cpu = cpu_percent(self._previous, current)
         self._previous = current
+
+        cores_now = parse_cpu_cores(stat)
+        cores = [
+            cpu_percent(before, after)
+            for before, after in zip(self._previous_cores, cores_now)
+        ]
+        self._previous_cores = cores_now
 
         used, total = parse_meminfo(_read("/proc/meminfo"))
         try:
@@ -216,14 +260,18 @@ class SystemProbe:
         except (ValueError, IndexError):
             load = (0.0, 0.0, 0.0)
 
+        # Юнит запускает бота как `python -m bashmak.bot` — по этому и ищем.
+        bot = find_process("bashmak.bot")
+        llama = find_process("llama-server")
         return System(
             cpu=cpu,
+            cores=cores,
             mem_used=used,
             mem_total=total,
             load=load if len(load) == 3 else (0.0, 0.0, 0.0),
-            # Юнит запускает бота как `python -m bashmak.bot` — по этому и ищем.
-            bot_pid=process_alive("bashmak.bot"),
-            llama_pid=process_alive("llama-server"),
+            bot_pid=bot[0] if bot else None,
+            llama_pid=llama[0] if llama else None,
+            model=model_from_cmdline(llama[1]) if llama else "?",
         )
 
 
@@ -260,7 +308,35 @@ def render_system(system: System, turns: Sequence[dict[str, Any]]) -> Panel:
         ("   реплик за час: ", "dim"),
         (str(recent_hour), "bold"),
     )
-    return Panel(Group(line1, line2), title="Башмак", border_style="cyan")
+    line3 = Text.assemble(("модель ", "dim"), (system.model, "bold cyan"))
+    return Panel(Group(line1, line2, line3), title="Башмак", border_style="cyan")
+
+
+def render_cores(cores: Sequence[float], per_row: int = 2, width: int = 8) -> Panel:
+    """Загрузка по ядрам — по колонке на каждое."""
+    table = Table(box=None, pad_edge=False, expand=True, show_header=False)
+    for _ in range(per_row):
+        table.add_column("", no_wrap=True)
+
+    cells: list[Text] = []
+    for index, value in enumerate(cores):
+        filled = max(0, min(width, round(value / 100 * width)))
+        colour = "green" if value < 60 else "yellow" if value < 85 else "red"
+        cells.append(
+            Text.assemble(
+                (f"{index:>2} ", "dim"),
+                ("█" * filled, colour),
+                ("░" * (width - filled), "dim"),
+                (f"{value:>4.0f}%", ""),
+            )
+        )
+    if not cells:
+        cells = [Text("нет данных (/proc недоступен)", style="dim")]
+
+    for start in range(0, len(cells), per_row):
+        row = cells[start : start + per_row]
+        table.add_row(*(row + [""] * (per_row - len(row))))
+    return Panel(table, title=f"ядра ({len(cores)})", border_style="magenta")
 
 
 def render_stages(turns: Sequence[dict[str, Any]]) -> Panel:
@@ -289,12 +365,12 @@ def render_stages(turns: Sequence[dict[str, Any]]) -> Panel:
     return Panel(table, title=f"задержки, с ({len(turns)} реплик)", border_style="blue")
 
 
-def render_turns(turns: Sequence[dict[str, Any]], limit: int = 8) -> Panel:
+def render_turns(turns: Sequence[dict[str, Any]], limit: int = 6) -> Panel:
     table = Table(box=None, pad_edge=False, expand=True, show_header=False)
     table.add_column("", width=5, style="dim")
-    # Без переноса: одна реплика — две строки, иначе длинный ответ разъезжается
-    # на пол-панели и вытесняет предыдущие.
-    table.add_column("", ratio=1, no_wrap=True, overflow="ellipsis")
+    # С переносом: ответ нужно видеть целиком, ради этого показываем меньше
+    # реплик. Обрезанный ответ бесполезен — по нему не понять, что бот сказал.
+    table.add_column("", ratio=1)
     table.add_column("", width=6, justify="right")
 
     for turn in list(turns)[-limit:]:
@@ -362,9 +438,10 @@ def render_trend(turns: Sequence[dict[str, Any]]) -> Panel:
 def build(
     system: System, turns: Sequence[dict[str, Any]], levels: dict[str, Any] | None = None
 ) -> Layout:
+    cores = system.cores
     layout = Layout()
     layout.split_column(
-        Layout(render_system(system, turns), size=4),
+        Layout(render_system(system, turns), size=5),
         Layout(name="middle", ratio=1),
         Layout(render_trend(turns), size=3),
     )
@@ -373,7 +450,9 @@ def build(
         Layout(render_turns(turns), ratio=3),
     )
     layout["left"].split_column(
-        Layout(render_stages(turns)),
+        Layout(render_stages(turns), size=10),
+        # По две колонки в ряд плюс рамка — столько строк панель и займёт.
+        Layout(render_cores(cores), size=(len(cores) + 1) // 2 + 2),
         Layout(render_levels(levels or {})),
     )
     return layout

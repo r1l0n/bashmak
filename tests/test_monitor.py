@@ -104,6 +104,42 @@ def test_sparkline_of_nothing_is_empty():
     assert monitor.sparkline([]) == ""
 
 
+def test_cores_are_parsed_per_cpu_not_the_total():
+    text = "cpu  100 0 100 800 0 0 0 0\ncpu0 50 0 50 400 0 0 0 0\ncpu1 50 0 50 400 0 0 0 0\n"
+
+    cores = monitor.parse_cpu_cores(text)
+
+    assert len(cores) == 2, "строка «cpu» без номера — это сумма, а не ядро"
+
+
+def test_core_load_is_computed_per_core():
+    before = monitor.parse_cpu_cores("cpu0 100 0 100 800 0 0 0 0\ncpu1 0 0 0 100 0 0 0 0\n")
+    after = monitor.parse_cpu_cores("cpu0 200 0 200 1600 0 0 0 0\ncpu1 0 0 0 200 0 0 0 0\n")
+
+    loads = [monitor.cpu_percent(b, a) for b, a in zip(before, after)]
+
+    assert loads[0] == pytest.approx(20.0)
+    assert loads[1] == pytest.approx(0.0)
+
+
+def test_cores_ignore_lines_that_are_too_short():
+    assert monitor.parse_cpu_cores("cpu0 1 2\nintr 999\n") == []
+
+
+@pytest.mark.parametrize(
+    ("cmdline", "want"),
+    [
+        ("/opt/llama-server --model models/llm/GigaChat-20B-q4_K_M.gguf --threads 6",
+         "GigaChat-20B-q4_K_M"),
+        ("/opt/llama-server --model=/srv/models/Qwen2.5-7B.gguf", "Qwen2.5-7B"),
+        ("/opt/llama-server --threads 6", "?"),
+        ("/opt/llama-server --model", "?"),
+    ],
+)
+def test_model_name_comes_from_the_running_process(cmdline, want):
+    assert monitor.model_from_cmdline(cmdline) == want
+
+
 def test_levels_missing_file_is_not_fatal(tmp_path):
     assert monitor.read_levels(tmp_path / "levels.json") == {}
 
