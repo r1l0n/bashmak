@@ -28,6 +28,7 @@ import functools
 import json
 import logging
 import logging.handlers
+import os
 import re
 import time
 from collections import OrderedDict, deque
@@ -110,6 +111,9 @@ log = logging.getLogger("bashmak.turn")
 #: JSON, а не разбором основного лога: монитор — другой процесс, и парсить
 #: обратно то, что мы только что красиво отформатировали, — гиблое дело.
 METRICS_NAME = "turns.jsonl"
+#: Живые уровни говорящих — снимок, а не история: монитору важно только
+#: «сейчас». Поэтому обычный json, который перезаписывается целиком.
+LEVELS_NAME = "levels.json"
 
 _metrics = logging.getLogger("bashmak.metrics")
 
@@ -123,6 +127,27 @@ def metrics_path(cfg: Any = None) -> Path:
     if section is None or "file" not in section:
         return default
     return section.path("file").with_name(METRICS_NAME)
+
+
+def levels_path(cfg: Any = None) -> Path:
+    """Где лежит снимок уровней. Рядом с метриками."""
+    return metrics_path(cfg).with_name(LEVELS_NAME)
+
+
+def publish_levels(path: Path, payload: dict[str, Any]) -> None:
+    """Переписать снимок уровней целиком.
+
+    Через временный файл и os.replace: монитор читает этот файл постоянно и
+    не должен ловить его наполовину записанным. Ошибки глотаем — индикатор
+    не повод ронять бота.
+    """
+    temporary = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        pass
 
 
 def _setup_metrics(log_file: Path | None, max_bytes: int, backups: int) -> None:

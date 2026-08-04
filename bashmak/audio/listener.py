@@ -40,6 +40,12 @@ IDLE_DROP_SECONDS = 60.0
 MAX_VAD_WINDOWS_PER_TICK = 16
 #: Как часто писать сводку «сколько звука пришло и что о нём думает VAD».
 LEVEL_REPORT_INTERVAL = 5.0
+#: Затухание полосы индикатора за тик опроса (30 мс).
+#:
+#: Без него индикатор дёргался бы вместе с формой волны и читался как рябь.
+#: 0.88 за 30 мс — полоса падает примерно за треть секунды: глазу видно, кто
+#: только что говорил, но за реальными паузами она успевает.
+METER_DECAY = 0.88
 
 
 class VoiceListener:
@@ -64,6 +70,10 @@ class VoiceListener:
         self._jobs: set[asyncio.Task] = set()
         #: user_id → [начало окна, пик амплитуды, макс. оценка VAD, сэмплов]
         self._levels: dict[int, list[float]] = {}
+        #: user_id → [пик с затуханием, оценка VAD, говорит ли, когда обновлено]
+        #: Это для индикатора в мониторе, живёт отдельно от сводки в лог:
+        #: там накопление за пять секунд, здесь — «прямо сейчас».
+        self._meter: dict[int, list[float]] = {}
         self._rate = int(cfg.audio.work_sample_rate)
 
         # Модель грузится один раз, состояние у каждого говорящего своё.
@@ -98,6 +108,7 @@ class VoiceListener:
         self._jobs.clear()
         self._segmenters.clear()
         self._levels.clear()
+        self._meter.clear()
         self.registry.clear()
         log.info("слушатель голоса остановлен")
 
@@ -144,6 +155,7 @@ class VoiceListener:
             else []
         )
 
+        self._update_meter(stream.user_id, samples, segmenter)
         self._report_level(stream.user_id, samples, segmenter)
 
         if not samples.size and not segmenter.pending:
@@ -156,10 +168,42 @@ class VoiceListener:
             elif idle > IDLE_DROP_SECONDS:
                 self._segmenters.pop(stream.user_id, None)
                 self._levels.pop(stream.user_id, None)
+                self._meter.pop(stream.user_id, None)
                 self.sink.forget(stream.user_id)
 
         for segment in segments:
             self._dispatch(segment)
+
+    def _update_meter(self, user_id: int, samples: np.ndarray, segmenter: Segmenter) -> None:
+        """Обновить полосу индикатора: пик с затуханием и мнение VAD."""
+        entry = self._meter.get(user_id)
+        if entry is None:
+            self._meter[user_id] = entry = [0.0, 0.0, 0.0, 0.0]
+
+        decayed = entry[0] * METER_DECAY
+        entry[0] = max(float(np.abs(samples).max()), decayed) if samples.size else decayed
+        entry[1] = float(segmenter.last_probability)
+        entry[2] = 1.0 if segmenter.in_speech else 0.0
+        entry[3] = time.monotonic()
+
+    def levels(self) -> dict[int, dict[str, float]]:
+        """Снимок уровней по говорящим — для монитора.
+
+        Чистое чтение накопленного: никакого ввода-вывода в аудиотракте,
+        файл пишет уже вызывающий (bashmak/bot.py).
+        """
+        return {
+            user_id: {
+                "peak": round(entry[0], 4),
+                "vad": round(entry[1], 3),
+                "speech": bool(entry[2]),
+            }
+            for user_id, entry in self._meter.items()
+        }
+
+    @property
+    def vad_threshold(self) -> float:
+        return float(self._vad_cfg.get("threshold", 0.5))
 
     def _report_level(self, user_id: int, samples: np.ndarray, segmenter: Segmenter) -> None:
         """Сводка раз в ``LEVEL_REPORT_INTERVAL``: громкость входа и оценка VAD.

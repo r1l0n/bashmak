@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -37,6 +38,8 @@ from .tts.silero_worker import TtsPool
 from .utils.logging import (
     current_cid,
     guard,
+    levels_path,
+    publish_levels,
     setup_logging,
     stage,
     stage_summary,
@@ -49,6 +52,9 @@ from .wakeword.filter import WakeWordFilter
 log = logging.getLogger(__name__)
 
 IDLE_CHECK_INTERVAL = 30.0
+#: Как часто публиковать уровни для монитора. Глазу этого хватает, а файл
+#: переписывается целиком — чаще незачем.
+LEVELS_INTERVAL = 0.4
 
 
 class GuildSession:
@@ -216,6 +222,7 @@ class BashmakBot(discord.Client):
 
         self.sessions: dict[int, GuildSession] = {}
         self._idle_task: asyncio.Task | None = None
+        self._levels_task: asyncio.Task | None = None
 
     # ---------------------------------------------------------- команды ----
     @staticmethod
@@ -278,16 +285,21 @@ class BashmakBot(discord.Client):
         self.llm_queue.start()
         if self._idle_task is None:
             self._idle_task = asyncio.create_task(self._idle_watch(), name="idle-watch")
+        if self._levels_task is None:
+            self._levels_task = asyncio.create_task(self._levels_watch(), name="levels")
 
     async def close(self) -> None:
         log.info("останавливаюсь...")
-        if self._idle_task is not None:
-            self._idle_task.cancel()
+        for name in ("_idle_task", "_levels_task"):
+            task = getattr(self, name)
+            if task is None:
+                continue
+            task.cancel()
             # Дождаться отмены, иначе на выходе прилетит
             # «Task was destroyed but it is pending».
             with contextlib.suppress(asyncio.CancelledError):
-                await self._idle_task
-            self._idle_task = None
+                await task
+            setattr(self, name, None)
         for session in list(self.sessions.values()):
             await session.close()
         self.sessions.clear()
@@ -313,6 +325,31 @@ class BashmakBot(discord.Client):
             if session.channel_id == channel_id:
                 return session
         return None
+
+    @guard("публикация уровней", reraise=False)
+    async def _levels_watch(self) -> None:
+        """Выкладывать уровни говорящих для монитора (bashmak/monitor.py).
+
+        Отдельной задачей, а не из слушателя: в аудиотракте, который крутится
+        каждые 30 мс, файловому вводу-выводу делать нечего. Здесь же это раз в
+        полсекунды и целиком мимо обработки речи.
+        """
+        path = levels_path(self.cfg)
+        empty_published = False
+        while True:
+            await asyncio.sleep(LEVELS_INTERVAL)
+            users: list[dict[str, Any]] = []
+            threshold = 0.5
+            for session in list(self.sessions.values()):
+                threshold = session.listener.vad_threshold
+                for user_id, level in session.listener.levels().items():
+                    users.append({"name": session.speaker_name(user_id), **level})
+
+            if not users and empty_published:
+                # Никого нет и монитор об этом уже знает — не трогаем диск.
+                continue
+            publish_levels(path, {"at": time.time(), "threshold": threshold, "users": users})
+            empty_published = not users
 
     @guard("сторож простоя", reraise=False)
     async def _idle_watch(self) -> None:

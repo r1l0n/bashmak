@@ -104,6 +104,34 @@ def test_sparkline_of_nothing_is_empty():
     assert monitor.sparkline([]) == ""
 
 
+def test_levels_missing_file_is_not_fatal(tmp_path):
+    assert monitor.read_levels(tmp_path / "levels.json") == {}
+
+
+def test_levels_half_written_file_is_not_fatal(tmp_path):
+    path = tmp_path / "levels.json"
+    path.write_text('{"users": [{"name": "Ва', encoding="utf-8")
+
+    assert monitor.read_levels(path) == {}
+
+
+def test_levels_round_trip(tmp_path):
+    """Стык бота и монитора: что бот опубликовал, то монитор и прочитал."""
+    from bashmak.utils.logging import publish_levels
+
+    path = tmp_path / "levels.json"
+    payload = {
+        "at": 1.0,
+        "threshold": 0.5,
+        "users": [{"name": "балбес", "peak": 0.8, "vad": 0.97, "speech": True}],
+    }
+
+    publish_levels(path, payload)
+
+    assert monitor.read_levels(path) == payload
+    assert not (tmp_path / "levels.tmp").exists(), "временный файл должен быть переименован"
+
+
 def test_bar_is_proportional_and_safe():
     assert monitor.bar(1.0, 2.0, width=10) == "█" * 5
     assert monitor.bar(1.0, 0.0) == ""

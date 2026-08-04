@@ -31,7 +31,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .utils.logging import metrics_path
+from .utils.logging import levels_path, metrics_path
 
 #: Сколько последних реплик держать в статистике.
 WINDOW = 60
@@ -309,6 +309,45 @@ def render_turns(turns: Sequence[dict[str, Any]], limit: int = 8) -> Panel:
     return Panel(table, title="последние реплики", border_style="green")
 
 
+def read_levels(path: Path) -> dict[str, Any]:
+    """Снимок уровней. Пустой словарь, если бот их не пишет."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def render_levels(levels: dict[str, Any], width: int = 22) -> Panel:
+    """Полосы уровня по говорящим — кто говорит и слышит ли его VAD."""
+    users = levels.get("users") or []
+    threshold = float(levels.get("threshold", 0.5))
+    stale = time.time() - float(levels.get("at", 0)) > 3.0
+
+    table = Table(box=None, pad_edge=False, expand=True, show_header=False)
+    table.add_column("", ratio=1, no_wrap=True, overflow="ellipsis")
+    table.add_column("", width=width)
+    table.add_column("", width=4, justify="right")
+
+    if not users:
+        table.add_row(Text("в канале тихо", style="dim"), "", "")
+    for user in sorted(users, key=lambda u: -float(u.get("peak", 0))):
+        peak = float(user.get("peak", 0.0))
+        vad = float(user.get("vad", 0.0))
+        filled = max(0, min(width, round(peak * width)))
+        # Цвет по мнению VAD, а не по громкости: важно не «шумно», а
+        # «распознаётся ли это как речь».
+        colour = "green" if user.get("speech") else "yellow" if vad >= threshold else "blue"
+        table.add_row(
+            Text(str(user.get("name", "?")), style="bold" if user.get("speech") else ""),
+            Text.assemble(("█" * filled, colour), ("░" * (width - filled), "dim")),
+            Text(f"{vad:.2f}", style="dim" if vad < threshold else colour),
+        )
+
+    title = "уровни" if not stale else "уровни (бот молчит)"
+    return Panel(table, title=f"{title}  порог VAD {threshold:.2f}", border_style="yellow")
+
+
 def render_trend(turns: Sequence[dict[str, Any]]) -> Panel:
     totals = [float(t.get("total", 0.0)) for t in turns]
     line = sparkline(totals) or "нет данных"
@@ -320,7 +359,9 @@ def render_trend(turns: Sequence[dict[str, Any]]) -> Panel:
     )
 
 
-def build(system: System, turns: Sequence[dict[str, Any]]) -> Layout:
+def build(
+    system: System, turns: Sequence[dict[str, Any]], levels: dict[str, Any] | None = None
+) -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(render_system(system, turns), size=4),
@@ -328,8 +369,12 @@ def build(system: System, turns: Sequence[dict[str, Any]]) -> Layout:
         Layout(render_trend(turns), size=3),
     )
     layout["middle"].split_row(
-        Layout(render_stages(turns), ratio=2),
+        Layout(name="left", ratio=2),
         Layout(render_turns(turns), ratio=3),
+    )
+    layout["left"].split_column(
+        Layout(render_stages(turns)),
+        Layout(render_levels(levels or {})),
     )
     return layout
 
@@ -338,10 +383,11 @@ def main() -> None:
     try:
         from .config import load_config
 
-        path = metrics_path(load_config())
+        cfg = load_config()
+        path, levels = metrics_path(cfg), levels_path(cfg)
     except Exception:
         # Конфига может не быть — монитор всё равно должен запуститься.
-        path = metrics_path()
+        path, levels = metrics_path(), levels_path()
 
     console = Console()
     probe = SystemProbe()
@@ -350,7 +396,7 @@ def main() -> None:
     try:
         with Live(console=console, screen=True, refresh_per_second=4) as live:
             while True:
-                live.update(build(probe.sample(), read_turns(path)))
+                live.update(build(probe.sample(), read_turns(path), read_levels(levels)))
                 time.sleep(REFRESH_S)
     except KeyboardInterrupt:
         pass
