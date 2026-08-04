@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from bashmak.intent.router import Intent, classify_by_rules, extract_query
+from bashmak.intent.router import Intent, classify_by_rules, extract_level, extract_query
 
 
 @pytest.mark.parametrize(
@@ -114,6 +114,70 @@ def test_silence_is_caught_with_or_without_music(text, music_playing):
 def test_silence_does_not_eat_neighbours(text):
     decision = classify_by_rules(text, music_playing=True)
     assert decision is None or decision.intent is not Intent.SILENCE
+
+
+@pytest.mark.parametrize(
+    "text, level",
+    [
+        # Ровно то, что было в логе: раньше это уезжало в music_louder.
+        ("громкость 100", 100),
+        ("громкость 50", 50),
+        ("поставь громкость на 30", 30),
+        ("сделай громкость 70 процентов", 70),
+        ("громкость до 20", 20),
+        ("выстави громкость в 0", 0),
+        # Whisper пишет числа то цифрами, то прописью.
+        ("громкость сто", 100),
+        ("громкость пятьдесят", 50),
+        ("громкость на восемьдесят", 80),
+    ],
+)
+@pytest.mark.parametrize("music_playing", [False, True])
+def test_volume_level_is_set_not_stepped(text, level, music_playing):
+    """Названо число — это установка значения, а не шаг «погромче»."""
+    decision = classify_by_rules(text, music_playing=music_playing)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is Intent.MUSIC_VOLUME
+    assert decision.level == level
+
+
+@pytest.mark.parametrize(
+    "text, intent",
+    [
+        # Без числа это по-прежнему шаг.
+        ("сделай погромче", Intent.MUSIC_LOUDER),
+        ("прибавь громкость", Intent.MUSIC_LOUDER),
+        ("сделай потише", Intent.MUSIC_QUIETER),
+        ("убавь громкость", Intent.MUSIC_QUIETER),
+    ],
+)
+def test_volume_without_a_number_is_still_a_step(text, intent):
+    decision = classify_by_rules(text, music_playing=True)
+    assert decision is not None
+    assert decision.intent is intent
+    assert decision.level is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Число рядом, но не про громкость — правило не должно на него прыгать.
+        "включи звуки природы 10 часов",
+        "поставь кино 1988",
+        "включи трек на 5 минут",
+    ],
+)
+def test_volume_rule_does_not_grab_stray_numbers(text):
+    decision = classify_by_rules(text, music_playing=True)
+    assert decision is not None
+    assert decision.intent is Intent.MUSIC_PLAY
+
+
+def test_extract_level_takes_a_bare_number_from_the_classifier():
+    """LLM отдаёт число отдельным полем, без слова «громкость»."""
+    assert extract_level("40") == 40
+    assert extract_level("") is None
+    assert extract_level("погромче") is None
 
 
 def test_stop_wins_over_play():

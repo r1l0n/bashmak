@@ -208,6 +208,8 @@ class GuildSession:
                 answer = self.player.louder()
             elif decision.intent is Intent.MUSIC_QUIETER:
                 answer = self.player.quieter()
+            elif decision.intent is Intent.MUSIC_VOLUME:
+                answer = self.player.volume(decision.level)
             else:  # pragma: no cover — все ветки перечислены выше
                 answer = "Не понял, что сделать с музыкой."
         except Exception:

@@ -163,8 +163,9 @@ class LlmQueue:
 
     async def _handle(self, task: ChatTask) -> None:
         # До запроса, а не после: если модель упадёт, в отчёте всё равно должно
-        # быть видно, что именно ей отправляли.
-        turn_note(sent=f"{task.speaker}: {task.text}")
+        # быть видно, что именно ей отправляли. Без имени говорящего — оно
+        # уходит в системную часть, а в шапке отчёта и так стоит.
+        turn_note(sent=task.text)
 
         history = self._history_for(task.channel_id)
         with stage(log, "llm", queue=self._queue.qsize(), контекст=len(history)) as info:

@@ -36,6 +36,8 @@ class Intent(str, Enum):
     MUSIC_STOP = "music_stop"
     MUSIC_LOUDER = "music_louder"
     MUSIC_QUIETER = "music_quieter"
+    #: «Громкость 70» — выставить значение, а не сдвинуть на шаг.
+    MUSIC_VOLUME = "music_volume"
 
 
 @dataclass(slots=True)
@@ -43,7 +45,34 @@ class Decision:
     intent: Intent
     query: str = ""
     source: str = "regex"
+    #: Проценты для music_volume. None — команду опознали, а число нет.
+    level: int | None = None
 
+
+#: Круглые числа словами: Whisper пишет их то цифрами, то прописью, и «громкость
+#: пятьдесят» должно работать так же, как «громкость 50». Составных («шестьдесят
+#: пять») тут нет намеренно — громкость называют круглой.
+_VOLUME_WORDS = {
+    "ноль": 0,
+    "десять": 10,
+    "двадцать": 20,
+    "тридцать": 30,
+    "сорок": 40,
+    "пятьдесят": 50,
+    "шестьдесят": 60,
+    "семьдесят": 70,
+    "восемьдесят": 80,
+    "девяносто": 90,
+    "сто": 100,
+}
+
+#: «Громкость 70», «поставь громкость на 50 процентов», «громкость сто».
+#: Между словом и числом \W*, а не \s*: через буквы он не переходит, поэтому
+#: число цепляется именно к «громкости», а не к первому попавшемуся в фразе —
+#: «включи звуки природы 10 часов» мимо.
+_VOLUME_LEVEL = re.compile(
+    r"\bгромкост\w*\W*(?:на\W+|до\W+|в\W+)?(\d{1,3}|" + "|".join(_VOLUME_WORDS) + r")\b"
+)
 
 # Порядок важен: «выключи музыку» должно поймать stop, а не play по «включ».
 #
@@ -66,6 +95,8 @@ _RULES: tuple[tuple[Intent, re.Pattern[str]], ...] = (
     (Intent.MUSIC_PAUSE, re.compile(r"\b(пауз\w*|приостанов\w*|погоди с музык\w*)\b")),
     (Intent.MUSIC_RESUME, re.compile(r"\b(продолж\w*|возобнов\w*|снова играй|с паузы)\b")),
     (Intent.MUSIC_SKIP, re.compile(r"\b(следующ\w*|дальше|скип\w*|пропусти|переключ\w*|другую песн\w*|другой трек)\b")),
+    # Раньше «прибавь громкость»: с числом это установка, а не шаг.
+    (Intent.MUSIC_VOLUME, _VOLUME_LEVEL),
     (Intent.MUSIC_LOUDER, re.compile(r"\b(по)?громче\b|\bприбав\w* (звук|громкост\w*)\b")),
     (Intent.MUSIC_QUIETER, re.compile(r"\b(по)?тише\b|\bубав\w* (звук|громкост\w*)\b")),
     (Intent.MUSIC_PLAY, re.compile(r"\b(включ\w*|постав\w*|запусти|врубн?и\w*|сыграй|играй|поищи|найди)\b")),
@@ -107,10 +138,12 @@ _CLASSIFIER_SYSTEM = (
     "Ты классификатор намерений голосового бота. Определи, чего хочет человек. "
     "Ответь ТОЛЬКО одним JSON-объектом без пояснений.\n"
     'Формат: {"intent": "<одно из: chat, silence, music_play, music_pause, music_resume, '
-    'music_skip, music_stop, music_louder, music_quieter>", "query": "<название трека '
-    'или пустая строка>"}\n'
+    'music_skip, music_stop, music_louder, music_quieter, music_volume>", "query": '
+    '"<название трека, число процентов или пустая строка>"}\n'
     'Если человек просто разговаривает — {"intent": "chat", "query": ""}.\n'
-    'Если человека просят заткнуться и замолчать — {"intent": "silence", "query": ""}.'
+    'Если человека просят заткнуться и замолчать — {"intent": "silence", "query": ""}.\n'
+    'Если названа конкретная громкость — {"intent": "music_volume", "query": "<число>"}; '
+    'если просят просто громче или тише — music_louder или music_quieter.'
 )
 
 _SCHEMA = {
@@ -128,6 +161,17 @@ def extract_query(text: str) -> str:
     cleaned = _FILLER.sub(" ", text)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.-—")
     return cleaned
+
+
+def extract_level(text: str) -> int | None:
+    """Достать проценты из «громкость 70». None — числа в реплике нет."""
+    found = _VOLUME_LEVEL.search(text.lower().replace("ё", "е"))
+    if found is None:
+        # Классификатор отдаёт число отдельным полем, без слова «громкость».
+        found = re.fullmatch(r"\s*(\d{1,3})\s*", text)
+        return int(found.group(1)) if found else None
+    value = found.group(1)
+    return int(value) if value.isdigit() else _VOLUME_WORDS[value]
 
 
 def classify_by_rules(text: str, *, music_playing: bool = False) -> Decision | None:
@@ -150,7 +194,8 @@ def classify_by_rules(text: str, *, music_playing: bool = False) -> Decision | N
                 and not _MUSIC_NOUN.search(lowered)
             ):
                 continue
-            return Decision(intent=intent, query=query, source="regex")
+            level = extract_level(lowered) if intent is Intent.MUSIC_VOLUME else None
+            return Decision(intent=intent, query=query, source="regex", level=level)
     return None
 
 
@@ -216,4 +261,5 @@ def _parse_decision(raw: str) -> Decision:
         intent = Intent.CHAT
 
     query = str(data.get("query", "") or "").strip()
-    return Decision(intent=intent, query=query, source="llm")
+    level = extract_level(query) if intent is Intent.MUSIC_VOLUME else None
+    return Decision(intent=intent, query=query, source="llm", level=level)

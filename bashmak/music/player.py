@@ -116,6 +116,13 @@ class MusicPlayer:
         value = self._arbiter.source.set_volume(self._arbiter.source.volume - VOLUME_STEP)
         return f"Громкость {round(value * 100)} процентов."
 
+    def volume(self, level: int | None) -> str:
+        """Выставить громкость в процентах: «громкость 70»."""
+        if level is None:
+            return "Какую громкость поставить? Скажи число."
+        value = self._arbiter.source.set_volume(level / 100)
+        return f"Громкость {round(value * 100)} процентов."
+
     def shutdown(self) -> None:
         self._queue.clear()
         self._release()
