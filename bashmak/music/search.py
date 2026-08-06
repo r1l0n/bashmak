@@ -1,7 +1,7 @@
 """Поиск трека и получение прямой ссылки на аудио-поток.
 
-Ничего не скачиваем на диск: yt-dlp отдаёт URL потока, ffmpeg читает его
-напрямую. Быстрее старт и не растёт диск на сервере.
+На диск ничего не скачивается: yt-dlp отдаёт URL потока, ffmpeg читает его
+напрямую. Быстрее старт и не растёт занятое место на сервере.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ log = logging.getLogger(__name__)
 #: Свой пул, а не общий executor лупа.
 #:
 #: ``asyncio.wait_for`` снимает ожидание, но не сам поток: yt-dlp продолжает
-#: висеть на сети до своего socket_timeout. На дефолтном executor'е серия
-#: неудачных поисков забила бы его насмерть — вместе со всеми остальными
-#: run_in_executor в процессе. Здесь же худший случай локален: поиск подождёт
-#: освободившийся слот и вернёт «не нашёл».
+#: висеть на сети до своего socket_timeout. На executor'е по умолчанию серия
+#: неудачных поисков заняла бы его целиком вместе со всеми остальными
+#: run_in_executor в процессе. С отдельным пулом худший случай локален: поиск
+#: дожидается свободного слота и возвращает «не нашёл».
 _EXECUTOR: ThreadPoolExecutor | None = None
 
 _YDL_OPTIONS = {
@@ -50,7 +50,7 @@ class SearchError(RuntimeError):
 
 
 def _extract(query: str) -> Track:
-    """Блокирующая часть: сеть + разбор. Крутится в тредпуле."""
+    """Блокирующая часть: сеть и разбор. Выполняется в тредпуле."""
     with yt_dlp.YoutubeDL(_YDL_OPTIONS) as ydl:
         info = ydl.extract_info(query, download=False)
 
@@ -84,7 +84,7 @@ def _executor() -> ThreadPoolExecutor:
 
 
 def shutdown() -> None:
-    """Закрыть пул поиска. Зависшие потоки не ждём — они умрут по таймауту сокета."""
+    """Закрыть пул поиска. Зависшие потоки завершатся по таймауту сокета."""
     global _EXECUTOR
     if _EXECUTOR is not None:
         _EXECUTOR.shutdown(wait=False, cancel_futures=True)
@@ -100,7 +100,7 @@ async def search(query: str, timeout: float = 20.0) -> Track:
         raise SearchError(f"поиск {query!r} занял больше {timeout:.0f} с") from exc
     except SearchError:
         raise
-    except Exception as exc:  # yt-dlp кидает свои типы ошибок на каждый чих
+    except Exception as exc:  # у yt-dlp свои типы ошибок почти на каждый случай
         raise SearchError(f"не смог найти {query!r}: {exc}") from exc
 
     log.debug("найден трек: %s (%s)", track.title, track.page_url)

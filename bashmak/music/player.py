@@ -32,9 +32,9 @@ class MusicPlayer:
         self._arbiter = arbiter
         self._queue: deque[Track] = deque()
         self._current: Track | None = None
-        # Источник текущего трека — «удостоверение личности» для _on_track_end:
-        # колбэк приезжает через луп и легко может относиться к треку, который
-        # мы уже сами сняли (см. skip).
+        # Источник текущего трека — идентификатор для _on_track_end: колбэк
+        # приходит через луп и может относиться к треку, который уже сняли
+        # (см. skip).
         self._source: discord.AudioSource | None = None
         self._max_queue = int(self._cfg.get("max_queue", 20))
         self._search_timeout = float(self._cfg.get("search_timeout_s", 20))
@@ -94,8 +94,8 @@ class MusicPlayer:
         if self._current is None:
             return "Пропускать нечего."
         skipped = self._current.title
-        # set_music(None) не дёргает on_music_end, поэтому следующий трек
-        # запускаем руками.
+        # set_music(None) не вызывает on_music_end, поэтому следующий трек
+        # запускается явно.
         self._release()
         if not self._advance():
             return f"Пропустил {skipped}. Очередь пуста."
@@ -154,10 +154,10 @@ class MusicPlayer:
     def _on_track_end(self, source: discord.AudioSource) -> None:
         """Вызывается микшером (через луп), когда ffmpeg закончил трек."""
         if source is not self._source:
-            # Трек кончился ровно в тот момент, когда его и так сняли (skip,
-            # stop). Без этой проверки мы бы промотали ещё один трек и
-            # рассинхронизировали _current с тем, что реально звучит.
-            log.debug("трек закончился, но его уже сняли — колбэк устарел")
+            # Трек закончился ровно в тот момент, когда его уже сняли (skip,
+            # stop). Без этой проверки промотался бы ещё один трек, и _current
+            # разошёлся бы с тем, что реально звучит.
+            log.debug("трек закончился, но его уже сняли: колбэк устарел")
             return
 
         finished = self._current.title if self._current else "?"

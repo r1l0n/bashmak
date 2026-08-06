@@ -92,7 +92,7 @@ def test_chat_falls_through_rules(text):
 )
 @pytest.mark.parametrize("music_playing", [False, True])
 def test_silence_is_caught_with_or_without_music(text, music_playing):
-    """Заткнуться бот обязан и когда музыки нет — это команда не плееру."""
+    """Команда молчания срабатывает и без музыки: она адресована не плееру."""
     decision = classify_by_rules(text, music_playing=music_playing)
     assert decision is not None, f"правила не поймали {text!r}"
     assert decision.intent is Intent.SILENCE

@@ -203,9 +203,9 @@ class FakeConfig:
 
 
 def test_interrupt_stops_synthesis_mid_reply(loop):
-    """«Завали ебало» посреди ответа: остаток даже не должен синтезироваться.
+    """Команда молчания посреди ответа: остаток не должен синтезироваться.
 
-    Чистки буфера мало — без сдвига поколения цикл speak() дотянул бы из
+    Чистки буфера мало: без сдвига поколения цикл speak() дотянул бы из
     генератора все оставшиеся предложения и они бы зазвучали.
     """
     out = OutputArbiter(FakeConfig(), loop)
@@ -220,7 +220,7 @@ def test_interrupt_stops_synthesis_mid_reply(loop):
 
     loop.run_until_complete(asyncio.wait_for(out.speak(chunks()), 5.0))
 
-    assert synthesized == [0], "после «заткнись» следующие куски тянуть незачем"
+    assert synthesized == [0], "после команды молчания следующие куски тянуть незачем"
     assert not out.source.speaking
 
 

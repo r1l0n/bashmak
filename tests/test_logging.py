@@ -41,13 +41,13 @@ def test_llm_intent_stage_is_named_like_the_others():
 def test_report_prints_heard_sent_and_reply(caplog):
     caplog.set_level(logging.INFO)
     _record_stages(stt=0.5, llm=2.0)
-    blog.turn_note(speaker="балбес", heard="иди нахуй", sent="балбес: иди нахуй", reply="сам иди")
+    blog.turn_note(speaker="Вася", heard="привет", sent="привет", reply="и тебе привет")
 
     blog.turn_report()
 
     text = caplog.text
-    assert "балбес" in text
-    assert "иди нахуй" in text and "сам иди" in text
+    assert "Вася" in text
+    assert "привет" in text and "и тебе привет" in text
     assert "stt 0.5" in text and "llm 2.0" in text
     assert blog._open_turns == {}, "отчёт напечатан — реплику надо закрыть"
 
@@ -87,7 +87,7 @@ def test_metrics_line_is_readable_by_the_monitor(tmp_path, monkeypatch):
     monkeypatch.setattr(blog, "METRICS_NAME", "turns.jsonl")
 
     _record_stages(stt=0.5, llm=2.0)
-    blog.turn_note(speaker="балбес", heard="иди нахуй", reply="сам иди")
+    blog.turn_note(speaker="Вася", heard="привет", reply="и тебе привет")
     blog.turn_report()
     for handler in blog._metrics.handlers:
         handler.flush()
@@ -95,7 +95,7 @@ def test_metrics_line_is_readable_by_the_monitor(tmp_path, monkeypatch):
     turns = monitor.read_turns(path)
 
     assert len(turns) == 1
-    assert turns[0]["speaker"] == "балбес"
+    assert turns[0]["speaker"] == "Вася"
     assert turns[0]["stages"]["llm"] == pytest.approx(2.0)
     # total — это настоящее время жизни реплики; в тесте оно микросекундное.
     assert turns[0]["total"] >= 0

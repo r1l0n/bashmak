@@ -1,7 +1,7 @@
-"""Очередь LLM: короткая история на канал и «завали ебало».
+"""Очередь LLM: короткая история на канал и команда молчания.
 
-Клиент и озвучка подменены заглушками — проверяем ровно то, что делает сама
-очередь: что уходит в модель, что доезжает до озвучки и что остаётся в памяти.
+Клиент и озвучка подменены заглушками, проверяется только то, что делает сама
+очередь: что уходит в модель, что доходит до озвучки и что остаётся в памяти.
 """
 
 from __future__ import annotations
@@ -71,7 +71,7 @@ async def ask(
     """Отправить реплику и дождаться, пока очередь отработает её целиком.
 
     ``ended_at`` — когда человек договорил. Явно его задают там, где важно, что
-    реплика прозвучала уже после «заткнись»: шаг monotonic() на Windows до
+    реплика прозвучала уже после команды молчания: шаг monotonic() на Windows до
     16 мс, и в тесте две соседние строки попадают в один тик.
     """
     await queue.submit(
@@ -116,7 +116,7 @@ def test_previous_exchange_reaches_the_model(loop):
 
 
 def test_speaker_name_stays_out_of_history(loop):
-    """Ник не должен просачиваться в контекст — иначе баг вернётся окольным путём."""
+    """Ник не должен попадать в контекст: иначе баг возвращается окольным путём."""
     queue, client, _ = build()
 
     async def scenario():
@@ -196,7 +196,7 @@ def test_history_stores_the_trimmed_reply(loop):
 
 # ------------------------------------------------------------------ drop --
 def test_drop_discards_queued_replies(loop):
-    """«Завали ебало»: то, что стоит в очереди, разбирать уже незачем."""
+    """Команда молчания: то, что стоит в очереди, разбирать уже незачем."""
     queue, client, spoken = build()
 
     async def scenario():
@@ -213,7 +213,7 @@ def test_drop_discards_queued_replies(loop):
 
 
 def test_drop_discards_a_reply_that_was_already_computed(loop):
-    """Пока модель думала, велели молчать — готовый ответ выбрасываем."""
+    """Команда молчания пришла, пока модель считала: ответ выбрасывается."""
     queue, client, spoken = build()
     client.before_reply = lambda: queue.drop(CHANNEL)
 
@@ -226,7 +226,7 @@ def test_drop_discards_a_reply_that_was_already_computed(loop):
 
 
 def test_question_after_the_shut_up_is_answered_from_scratch(loop):
-    """Заткнули — но следующий вопрос обслуживается как обычно, без контекста."""
+    """После команды молчания следующий вопрос обслуживается без контекста."""
     queue, client, spoken = build()
 
     async def scenario():

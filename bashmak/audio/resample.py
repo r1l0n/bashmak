@@ -1,11 +1,12 @@
 """Пересчёт частоты дискретизации между форматом Discord и форматом моделей.
 
-Discord отдаёт и принимает 48 кГц / 2 канала / s16le. VAD и Whisper работают
-с 16 кГц моно float32, Piper синтезирует 22.05 кГц моно int16.
+Discord отдаёт и принимает 48 кГц / 2 канала / s16le. VAD и Whisper работают с
+16 кГц моно float32, Silero TTS синтезирует моно int16 с частотой из конфига
+(по умолчанию 48 кГц).
 
-Ресемплинг потоковый (:class:`StreamResampler`), а не покадровый: если гонять
-stateless-функцию на каждые 20 мс, на стыках кадров появляются щелчки, и VAD
-начинает принимать их за речь.
+Ресемплинг потоковый (:class:`StreamResampler`), а не покадровый: при вызове
+stateless-функции на каждые 20 мс на стыках кадров появляются щелчки, и VAD
+принимает их за речь.
 """
 
 from __future__ import annotations
@@ -26,8 +27,8 @@ class StreamResampler:
         self.out_rate = out_rate
         self._stream = None
         if in_rate != out_rate:
-            # ResampleStream появился не во всех сборках soxr — если его нет,
-            # откатываемся на stateless-вариант (чуть хуже на стыках, но работает).
+            # ResampleStream есть не во всех сборках soxr; при его отсутствии
+            # используется stateless-вариант (хуже на стыках, но работает).
             factory = getattr(soxr, "ResampleStream", None)
             if factory is not None:
                 self._stream = factory(in_rate, out_rate, 1, dtype="float32")

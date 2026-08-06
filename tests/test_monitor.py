@@ -159,7 +159,7 @@ def test_levels_round_trip(tmp_path):
     payload = {
         "at": 1.0,
         "threshold": 0.5,
-        "users": [{"name": "балбес", "peak": 0.8, "vad": 0.97, "speech": True}],
+        "users": [{"name": "Вася", "peak": 0.8, "vad": 0.97, "speech": True}],
     }
 
     publish_levels(path, payload)

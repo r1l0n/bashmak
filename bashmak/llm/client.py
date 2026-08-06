@@ -24,17 +24,15 @@ MESSAGE_SEP = "<|message_sep|>"
 def render_prompt(messages: list[dict[str, str]]) -> str:
     """Собрать промпт в формате GigaChat.
 
-    Почему вручную, а не через /v1/chat/completions: чат-слой llama.cpp этот
-    формат не тянет. Штатный шаблон берёт разделители из переменной
-    additional_special_tokens, которой в llama.cpp нет, — промпт уезжает без
-    разделителей вовсе. А со своим шаблоном сборка b10237 сама выводит
-    peg-парсер ответа и падает с 500 «output does not match the expected
-    peg-native format» уже на нормальной реплике модели.
+    Вручную, а не через /v1/chat/completions: чат-слой llama.cpp этот формат не
+    поддерживает. Штатный шаблон берёт разделители из переменной
+    additional_special_tokens, которой в llama.cpp нет, и промпт уходит без
+    разделителей вовсе. Со своим шаблоном сборка b10237 выводит peg-парсер
+    ответа и падает с 500 «output does not match the expected peg-native
+    format» на обычной реплике модели.
 
-    Здесь же формат целиком наш, и ломаться в нём нечему.
-
-    Без <s> намеренно: /completion токенизирует промпт с add_special=true и
-    ставит BOS сам, а второй BOS модель бы только сбил.
+    ``<s>`` не добавляется: /completion токенизирует промпт с add_special=true
+    и ставит BOS сам, второй BOS сбил бы модель.
     """
     parts: list[str] = []
     for message in messages:
@@ -45,24 +43,24 @@ def render_prompt(messages: list[dict[str, str]]) -> str:
         parts.append(f"{message['role']}{ROLE_SEP}{content}{MESSAGE_SEP}")
         if message["role"] == "user":
             # Блок функций модель ждёт после каждой реплики пользователя.
-            # Пустой список — это штатное «их нет», а не заглушка.
+            # Пустой список — штатное обозначение «функций нет».
             parts.append(f"available functions{ROLE_SEP}[]{MESSAGE_SEP}")
     parts.append(f"assistant{ROLE_SEP}")
     return "".join(parts)
 
 
-#: Сколько букв объяснения от сервера тащить в лог. Ошибка шаблона чата бывает
-#: длинной (minja печатает кусок шаблона), но начало — самое важное.
+#: Сколько символов пояснения от сервера писать в лог. Ошибка шаблона чата
+#: бывает длинной (minja печатает кусок шаблона), но информативно её начало.
 _DETAIL_CHARS = 600
 
 
 def _server_error(response: httpx.Response) -> str:
     """Достать из ответа причину, а не только код.
 
-    raise_for_status() показывает «500 Internal Server Error» и выбрасывает
-    тело — а llama-server именно там пишет, что случилось: ошибку шаблона
-    чата, переполненный контекст, неизвестный параметр. Дважды на этом
-    потеряли время, поэтому разбираем тело руками.
+    raise_for_status() показывает «500 Internal Server Error» и отбрасывает
+    тело, а llama-server пишет в нём, что именно случилось: ошибку шаблона
+    чата, переполненный контекст, неизвестный параметр. Поэтому тело
+    разбирается вручную.
     """
     detail = ""
     try:
@@ -109,7 +107,7 @@ class LlmClient:
         return response.status_code == 200
 
     async def wait_until_ready(self, timeout: float = 300.0, interval: float = 3.0) -> bool:
-        """Модель в 12 ГБ грузится с диска минуты — бот должен её дождаться, а не упасть."""
+        """Модель в 12 ГБ грузится с диска минутами, бот должен её дождаться."""
         deadline = asyncio.get_running_loop().time() + timeout
         announced = False
         while asyncio.get_running_loop().time() < deadline:
@@ -125,9 +123,9 @@ class LlmClient:
     def _check_roles(messages: list[dict[str, str]]) -> None:
         """Шаблон GigaChat требует строгого чередования user/assistant.
 
-        Нарушение он ловит сам — но уже на сервере, отдавая 500 с жалобой из
-        Jinja, и в логе бота остаётся только «llama-server не ответил».
-        Здесь же видно, кто именно собрал такой список.
+        Нарушение он ловит сам, но уже на сервере: отдаёт 500 с ошибкой Jinja,
+        и в логе бота остаётся только «llama-server не ответил». Здесь видно,
+        кто именно собрал такой список.
         """
         roles = [m["role"] for m in messages if m["role"] != "system"]
         expected = ["user" if i % 2 == 0 else "assistant" for i in range(len(roles))]
@@ -157,8 +155,8 @@ class LlmClient:
             "cache_prompt": True,
         }
         if json_schema is not None:
-            # llama-server умеет ограничивать вывод схемой — так JSON приходит
-            # валидным, а не «почти». Если сборка старая и параметр не понят,
+            # llama-server умеет ограничивать вывод схемой, тогда JSON приходит
+            # гарантированно валидным. Если сборка старая и параметр не понят,
             # ответ всё равно разбирается защитно на стороне вызывающего.
             payload["json_schema"] = json_schema
 
