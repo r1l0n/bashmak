@@ -6,7 +6,6 @@
 
 Целевое железо: Ubuntu x86_64, 6–10 ядер, 40 ГБ RAM. GPU не требуется.
 
-Исходное техническое задание — [bashmak_project_plan.md](bashmak_project_plan.md).
 
 ---
 
