@@ -178,7 +178,10 @@ class GuildSession:
         if decision.intent is Intent.CHAT:
             await self.bot.llm_queue.submit(
                 ChatTask(
-                    ended_at=time.monotonic(),
+                    # Момент конца фразы, а не текущее время: очередь
+                    # расставляет приоритет по нему, и время, потраченное на
+                    # STT и разбор намерения, не должно двигать человека в конец.
+                    ended_at=transcript.ended_at,
                     channel_id=self.channel_id,
                     user_id=transcript.user_id,
                     speaker=speaker,

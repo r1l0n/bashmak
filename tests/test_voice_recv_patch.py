@@ -11,7 +11,7 @@ from __future__ import annotations
 import heapq
 from dataclasses import dataclass, field
 
-from bashmak.audio.voice_recv_patch import dave_unwrap, take_lowest
+from bashmak.audio.voice_recv_patch import _replace, dave_unwrap, take_lowest
 
 
 @dataclass(order=True)
@@ -99,3 +99,24 @@ def test_пустой_кадр_проходит_насквозь():
     session = _Session()
     assert dave_unwrap(session, 1, 4711, AUDIO, b"") == b""
     assert session.calls == []
+
+
+# --------------------------------------------------- установка заплаток ----
+def test_заплатка_на_переименованный_метод_не_встаёт_молча(caplog):
+    """Главное свойство: подмена несуществующего метода видна в логе.
+
+    Голое присваивание завело бы новый атрибут, заплатка осталась бы мёртвой, а
+    приём DAVE превратился бы в шум без единой строки в логе.
+    """
+
+    class _Decoder:
+        def существующий(self) -> str:
+            return "оригинал"
+
+    assert _replace(_Decoder, "существующий", lambda self: "заплатка")
+    assert _Decoder().существующий() == "заплатка"
+
+    with caplog.at_level("ERROR"):
+        assert not _replace(_Decoder, "переименованный", lambda self: "заплатка")
+    assert not hasattr(_Decoder, "переименованный"), "мёртвый атрибут заводить нельзя"
+    assert "переименованный" in caplog.text

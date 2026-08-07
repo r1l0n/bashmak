@@ -82,7 +82,7 @@ class VoiceListener:
         # Discord перестаёт слать пакеты, когда человек замолчал, — тишины,
         # по которой VAD закрыл бы фразу, физически не приходит. Поэтому
         # закрываем её сами, продержав паузу чуть дольше порога VAD.
-        self._hangover = float(self._vad_cfg.get("silence_ms", 700)) / 1000 + 0.2
+        self._hangover = float(self._vad_cfg.get("silence_ms", 500)) / 1000 + 0.2
 
     def start(self) -> None:
         if self._task is None or self._task.done():
@@ -119,7 +119,7 @@ class VoiceListener:
                 user_id,
                 SileroVad(self._vad_path, int(self._cfg.audio.work_sample_rate)),
                 threshold=float(self._vad_cfg.get("threshold", 0.5)),
-                silence_ms=int(self._vad_cfg.get("silence_ms", 700)),
+                silence_ms=int(self._vad_cfg.get("silence_ms", 500)),
                 min_speech_ms=int(self._vad_cfg.get("min_speech_ms", 300)),
                 max_segment_s=float(self._vad_cfg.get("max_segment_s", 20)),
                 preroll_ms=int(self._vad_cfg.get("preroll_ms", 300)),

@@ -56,6 +56,7 @@ class MixerSource(discord.AudioSource):
         volume: float = 0.5,
         duck_volume: float = 0.25,
         fade_ms: int = 150,
+        duck_hold_ms: int = 400,
         on_music_end: Callable[[discord.AudioSource], None] | None = None,
     ) -> None:
         self._loop = loop
@@ -73,6 +74,15 @@ class MixerSource(discord.AudioSource):
         frames = max(1, round(fade_ms / 20))
         self._fade_step = 1.0 / frames
         self._gain_ratio = 1.0  # 1.0 — обычная громкость, 0.0 — полностью приглушено
+
+        # Сколько кадров держать музыку внизу после того, как речь кончилась.
+        #
+        # Реплика приходит кусками, и между ними буфер пустеет: следующее
+        # предложение ещё синтезируется. Без удержания музыка на каждой такой
+        # паузе успевает всплыть и снова нырнуть — на слух это «дыхание» фона
+        # посреди ответа. Отпускать её нужно один раз, когда бот правда договорил.
+        self._hold_frames = max(0, round(duck_hold_ms / 20))
+        self._hold_left = 0
 
         self._music: discord.AudioSource | None = None
         self._music_paused = False
@@ -176,8 +186,14 @@ class MixerSource(discord.AudioSource):
         speech = self._take_tts()
         music = self._take_music()
 
-        # Даккинг: пока в буфере есть речь, плавно уводим музыку вниз.
-        target = 0.0 if speech is not None else 1.0
+        # Даккинг: пока в буфере есть речь — и ещё _hold_frames после неё —
+        # музыка держится внизу. Считаем здесь: _mix() крутится только в потоке
+        # плеера, так что счётчик односоставный и синхронизации не требует.
+        if speech is not None:
+            self._hold_left = self._hold_frames
+        elif self._hold_left > 0:
+            self._hold_left -= 1
+        target = 0.0 if (speech is not None or self._hold_left > 0) else 1.0
         if self._gain_ratio < target:
             self._gain_ratio = min(target, self._gain_ratio + self._fade_step)
         elif self._gain_ratio > target:
@@ -254,6 +270,7 @@ class OutputArbiter:
             volume=float(music.get("volume", 0.5)),
             duck_volume=float(music.get("duck_volume", 0.25)),
             fade_ms=int(music.get("duck_fade_ms", 150)),
+            duck_hold_ms=int(music.get("duck_hold_ms", 400)),
         )
         # Бот говорит одним голосом: две реплики одновременно смешались бы в кашу.
         self._lock = asyncio.Lock()

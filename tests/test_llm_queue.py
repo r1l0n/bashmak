@@ -98,6 +98,34 @@ def run(loop, queue, scenario) -> None:
     loop.run_until_complete(asyncio.wait_for(main(), 5.0))
 
 
+# -------------------------------------------------------------- приоритет --
+def test_who_finished_speaking_first_is_answered_first(loop):
+    """Порядок задаёт конец фразы, а не момент попадания в очередь.
+
+    Реплика, договорённая раньше, может доехать до очереди позже: у её автора
+    сегмент длиннее, значит и STT считал дольше. Отвечать всё равно нужно ему
+    первым — иначе тот, кто говорит короткими фразами, всегда влезает вперёд.
+    """
+    queue, client, _ = build()
+    now = time.monotonic()
+
+    async def scenario():
+        # Кладём «поздний» первым: если приоритет сломан, он же первым и уйдёт.
+        await queue.submit(
+            ChatTask(ended_at=now, channel_id=CHANNEL, speaker="Петя", text="договорил позже")
+        )
+        await queue.submit(
+            ChatTask(ended_at=now - 1.0, channel_id=CHANNEL, speaker="Вася", text="договорил раньше")
+        )
+        await queue._queue.join()
+        await asyncio.gather(*list(queue._deliveries), return_exceptions=True)
+
+    run(loop, queue, scenario)
+
+    asked = [call[-1]["content"] for call in client.calls]
+    assert asked == ["договорил раньше", "договорил позже"]
+
+
 # ---------------------------------------------------------------- история --
 def test_previous_exchange_reaches_the_model(loop):
     queue, client, spoken = build()

@@ -55,6 +55,27 @@ def apply() -> None:
     _patch_decoder_resilience()
 
 
+def _replace(owner: type, name: str, replacement) -> bool:  # noqa: ANN001
+    """Подменить метод, но только если он там вообще есть.
+
+    Голое присваивание ``Class.method = ...`` при переименовании в библиотеке
+    просто заводит новый атрибут: заплатка остаётся в коде, но её никто больше
+    не зовёт. Для приёма DAVE это означает шум вместо голоса и пустой лог.
+    Библиотека пинится точной версией именно поэтому — но пин снимают руками,
+    а эта проверка сработает сама.
+    """
+    if not hasattr(owner, name):
+        log.error(
+            "%s.%s больше нет — заплатка не встала. Проверьте версию "
+            "discord-ext-voice-recv (ожидается 0.5.2a179)",
+            owner.__name__,
+            name,
+        )
+        return False
+    setattr(owner, name, replacement)
+    return True
+
+
 def _passthrough(session, user_id: int) -> bool:  # noqa: ANN001 — davey.DaveSession
     """Шлёт ли этот участник открытые кадры.
 
@@ -206,7 +227,7 @@ def _patch_dave_decrypt() -> None:
         self._last_ts = packet.timestamp
         return data
 
-    decoder._process_packet = _process_packet
+    _replace(decoder, "_process_packet", _process_packet)
 
 
 def _patch_gap_recovery() -> None:
@@ -236,7 +257,7 @@ def _patch_gap_recovery() -> None:
             packet = self._make_fakepacket()
         return packet
 
-    recv_opus.PacketDecoder._get_next_packet = _get_next_packet
+    _replace(recv_opus.PacketDecoder, "_get_next_packet", _get_next_packet)
 
 
 def _patch_decoder_resilience() -> None:

@@ -79,7 +79,7 @@ def test_music_alone_plays_at_full_volume(loop):
 
 
 def test_music_is_ducked_while_speaking(loop):
-    mixer = MixerSource(loop=loop, volume=1.0, duck_volume=0.0, fade_ms=20)
+    mixer = MixerSource(loop=loop, volume=1.0, duck_volume=0.0, fade_ms=20, duck_hold_ms=0)
     speech = frame(1000)
     mixer.push_tts(speech)
     mixer.set_music(FakeMusic([frame(9000), frame(9000)]))
@@ -90,6 +90,31 @@ def test_music_is_ducked_while_speaking(loop):
     # Речь кончилась — музыка возвращается.
     restored = np.frombuffer(mixer.read(), dtype="<i2")
     assert restored.max() > 0
+
+
+def test_music_does_not_surface_between_chunks_of_one_reply(loop):
+    """Пауза между кусками TTS не должна поднимать музыку.
+
+    Регрессия на слух: следующее предложение ещё синтезируется, буфер речи
+    пуст, и без удержания фон всплывает и ныряет обратно на каждом стыке.
+    """
+    hold_ms = 200
+    mixer = MixerSource(
+        loop=loop, volume=1.0, duck_volume=0.0, fade_ms=20, duck_hold_ms=hold_ms
+    )
+    mixer.set_music(FakeMusic([frame(9000)] * 50))
+    mixer.push_tts(frame(1000))
+
+    mixer.read()  # кадр речи, музыка ушла вниз
+
+    # Пауза короче удержания — фон обязан остаться внизу.
+    for _ in range(hold_ms // 20 - 1):
+        assert np.frombuffer(mixer.read(), dtype="<i2").max() == 0
+
+    # А когда бот правда договорил, музыка возвращается.
+    for _ in range(hold_ms // 20 + 2):
+        mixer.read()
+    assert np.frombuffer(mixer.read(), dtype="<i2").max() > 0
 
 
 def test_finished_track_is_released_and_reported(loop):

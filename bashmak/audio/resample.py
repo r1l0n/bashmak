@@ -77,18 +77,3 @@ def float_mono_to_discord_pcm(samples: np.ndarray) -> bytes:
     clipped = np.clip(samples * 32767.0, -32768.0, 32767.0).astype("<i2")
     stereo = np.repeat(clipped[:, np.newaxis], DISCORD_CHANNELS, axis=1)
     return stereo.tobytes()
-
-
-def mono_to_discord_pcm(mono: np.ndarray, src_rate: int) -> bytes:
-    """Моно (int16 или float32) с частотой src_rate → 48 кГц stereo s16le.
-
-    Разовое преобразование без состояния. Для потока кусков (TTS) берите
-    :class:`StreamResampler`, иначе на стыках появятся щелчки.
-    """
-    if mono.size == 0:
-        return b""
-
-    samples = to_float_mono(mono)
-    if src_rate != DISCORD_RATE:
-        samples = soxr.resample(samples, src_rate, DISCORD_RATE)
-    return float_mono_to_discord_pcm(samples)

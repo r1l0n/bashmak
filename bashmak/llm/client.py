@@ -49,9 +49,42 @@ def render_prompt(messages: list[dict[str, str]]) -> str:
     return "".join(parts)
 
 
+#: Стоп-строки «конец первого предложения» — для complete(one_sentence=True).
+#:
+#: Персона отвечает одним предложением, и всё, что модель допишет после него,
+#: persona.clean_reply() всё равно выбросит. Но посчитано оно к этому моменту
+#: уже будет: на CPU это лишние секунды в каждой реплике, поэтому генерацию
+#: обрываем на сервере, а не после.
+#:
+#: Знак с пробелом, а не голый: «.» сработал бы внутри «3.5» и «т.д.», а «. » —
+#: только там, где за предложением правда идёт продолжение. Последнее
+#: предложение заканчивается на EOS и под правило не подпадает.
+_SENTENCE_STOPS = (". ", "! ", "? ", "… ")
+
+#: Чем сервер мог оборвать предложение — по этому знаку его и восстанавливаем.
+_SENTENCE_MARKS = frozenset(".!?…")
+
 #: Сколько символов пояснения от сервера писать в лог. Ошибка шаблона чата
 #: бывает длинной (minja печатает кусок шаблона), но информативно её начало.
 _DETAIL_CHARS = 600
+
+
+def _answer(data: dict[str, Any]) -> str:
+    """Текст ответа с возвращённым знаком конца предложения.
+
+    Сработавшую стоп-строку сервер в ``content`` не включает: от «Иди нахер! И
+    дверь закрой.» пришло бы «Иди нахер» без знака, и Silero прочитал бы фразу
+    с оборванной интонацией. Знак берём из ``stopping_word``.
+
+    Поле есть не во всех сборках llama.cpp, и приходить может как «! », так и
+    «!». Нет поля или знак незнакомый — остаёмся без знака: интонация того не
+    стоит, чтобы падать.
+    """
+    text = (data["content"] or "").rstrip()
+    stopped_by = str(data.get("stopping_word") or "").strip()
+    if text and stopped_by in _SENTENCE_MARKS:
+        text += stopped_by
+    return text.strip()
 
 
 def _server_error(response: httpx.Response) -> str:
@@ -77,7 +110,7 @@ def _server_error(response: httpx.Response) -> str:
 class LlmClient:
     def __init__(self, cfg) -> None:  # noqa: ANN001 — bashmak.config.Section
         self.base_url = str(cfg.get("server_url", "http://127.0.0.1:8080")).rstrip("/")
-        self.max_tokens = int(cfg.get("max_tokens", 200))
+        self.max_tokens = int(cfg.get("max_tokens", 48))
         self.temperature = float(cfg.get("temperature", 0.7))
         self.top_p = float(cfg.get("top_p", 0.9))
         timeout = float(cfg.get("request_timeout_s", 120))
@@ -139,18 +172,27 @@ class LlmClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         json_schema: dict[str, Any] | None = None,
+        one_sentence: bool = False,
         retries: int = 1,
     ) -> str:
+        """Сходить в модель и вернуть текст ответа.
+
+        ``one_sentence`` — оборвать генерацию на конце первого предложения (см.
+        :data:`_SENTENCE_STOPS`). Включать только там, где длиннее одного
+        предложения ответ и не нужен: для JSON-классификатора это порезало бы
+        объект пополам на запросе вроде «Кино. Группа крови».
+        """
         self._check_roles(messages)
         prompt = render_prompt(messages)
+        # Конец реплики — он же EOS, но модель иногда печатает его текстом.
+        stop = [MESSAGE_SEP, *(_SENTENCE_STOPS if one_sentence else ())]
         payload: dict[str, Any] = {
             "prompt": prompt,
             "n_predict": max_tokens if max_tokens is not None else self.max_tokens,
             "temperature": temperature if temperature is not None else self.temperature,
             "top_p": self.top_p,
             "stream": False,
-            # Конец реплики — он же EOS, но модель иногда печатает его текстом.
-            "stop": [MESSAGE_SEP],
+            "stop": stop,
             # Системная часть промпта не меняется, и её префикс сервер переиспользует.
             "cache_prompt": True,
         }
@@ -170,7 +212,7 @@ class LlmClient:
                     if response.status_code >= 400:
                         raise LlmError(_server_error(response))
                     data = response.json()
-                    return (data["content"] or "").strip()
+                    return _answer(data)
                 except (httpx.HTTPError, LlmError, KeyError, IndexError, ValueError) as exc:
                     last_error = exc
                     if attempt < retries:

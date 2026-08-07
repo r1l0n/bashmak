@@ -59,6 +59,9 @@ def _transcribe(
         beam_size=beam_size,
         # VAD уже отработал на входе, второй проход только тратит время.
         vad_filter=False,
+        # Таймкоды наружу не идут (ниже собирается только текст), а Whisper
+        # тратит на них токены вокруг каждого сегмента.
+        without_timestamps=True,
         # Без этого Whisper на коротких репликах дописывает продолжение
         # предыдущей фразы.
         condition_on_previous_text=False,
@@ -86,6 +89,13 @@ class Transcript:
     text: str
     duration: float
     avg_logprob: float
+    #: time.monotonic() на момент конца фразы — переносится из Segment как есть.
+    #: Именно по нему очередь LLM расставляет приоритет: «кто первым договорил,
+    #: тому первым и отвечаем». Если подставить сюда текущее время, порядок
+    #: начнёт определять скорость распознавания — ровно то, чего очередь
+    #: пытается избежать. Без значения по умолчанию намеренно: забытое поле
+    #: должно падать на месте, а не превращаться в ноль и тихо ломать порядок.
+    ended_at: float
 
 
 class SttPool:
@@ -151,6 +161,7 @@ class SttPool:
             text=text,
             duration=segment.duration,
             avg_logprob=avg_logprob,
+            ended_at=segment.ended_at,
         )
 
     def close(self) -> None:

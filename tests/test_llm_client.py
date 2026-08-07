@@ -7,10 +7,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import httpx
 import pytest
 
-from bashmak.llm.client import LlmClient, LlmError, _server_error, render_prompt
+from bashmak.llm.client import (
+    MESSAGE_SEP,
+    LlmClient,
+    LlmError,
+    _answer,
+    _server_error,
+    render_prompt,
+)
 from bashmak.llm.persona import build_messages
 
 
@@ -92,3 +102,86 @@ def test_every_user_turn_gets_the_functions_block():
     assert prompt.endswith("assistant<|role_sep|>")
     # Ответ ассистента идёт со своей ролью и без блока функций после неё.
     assert "assistant<|role_sep|>2<|message_sep|>user<|role_sep|>3" in prompt
+
+
+# ------------------------------------------ обрыв на конце предложения ----
+#
+# Генерацию сверх первого предложения всё равно выбрасывает clean_reply, но
+# считает её модель, и на CPU это секунды. Обрываем на сервере — а знак
+# препинания, который сервер при этом съедает, возвращаем обратно.
+
+
+@pytest.mark.parametrize(
+    ("content", "stopping_word", "want"),
+    [
+        # Сервер оборвал на «! » и сам знак в content не положил.
+        ("Иди нахер", "! ", "Иди нахер!"),
+        # Другие сборки отдают знак уже без пробела.
+        ("Не знаю", ".", "Не знаю."),
+        ("Не знаю", "… ", "Не знаю…"),
+        # Сборка без stopping_word: остаёмся без знака, но не падаем.
+        ("Норм", None, "Норм"),
+        # Оборвано концом реплики, а не предложения — дописывать нечего.
+        ("Норм.", MESSAGE_SEP, "Норм."),
+        # Пустой ответ знаком препинания не становится.
+        ("", "! ", ""),
+    ],
+)
+def test_sentence_mark_is_restored(content, stopping_word, want):
+    data = {"content": content}
+    if stopping_word is not None:
+        data["stopping_word"] = stopping_word
+    assert _answer(data) == want
+
+
+def _capture():
+    """Клиент с подменённым транспортом: запоминает, что ушло на сервер."""
+    sent: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(200, json={"content": "Ответ", "stopping_word": ""})
+
+    client = LlmClient(FakeSection())
+    client._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://llm.test"
+    )
+    return client, sent
+
+
+def _ask(client, messages, **kwargs) -> str:
+    async def main():
+        try:
+            return await client.complete(messages, **kwargs)
+        finally:
+            await client.close()
+
+    return asyncio.run(main())
+
+
+class FakeSection:
+    """Мини-заглушка Config.Section: клиент читает секцию только через get()."""
+
+    def __init__(self, **values):
+        self._values = values
+
+    def get(self, name, default=None):
+        return self._values.get(name, default)
+
+
+def test_chat_request_stops_at_the_first_sentence():
+    client, sent = _capture()
+
+    _ask(client, build_messages("Вася", "как дела"), one_sentence=True)
+
+    assert MESSAGE_SEP in sent["stop"]
+    assert {". ", "! ", "? ", "… "} <= set(sent["stop"])
+
+
+def test_other_requests_keep_the_full_output():
+    """Стоп по «. » порезал бы JSON классификатора на «Кино. Группа крови»."""
+    client, sent = _capture()
+
+    _ask(client, [{"role": "user", "content": "включи Кино"}])
+
+    assert sent["stop"] == [MESSAGE_SEP]

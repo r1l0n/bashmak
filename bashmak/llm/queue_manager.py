@@ -169,7 +169,10 @@ class LlmQueue:
         history = self._history_for(task.channel_id)
         with stage(log, "llm", queue=self._queue.qsize(), контекст=len(history)) as info:
             raw = await self._client.complete(
-                build_messages(task.speaker, task.text, history)
+                build_messages(task.speaker, task.text, history),
+                # Персона отвечает одним предложением: обрываем генерацию на
+                # его конце, а не досчитываем то, что clean_reply() выбросит.
+                one_sentence=True,
             )
             info["chars"] = len(raw)
 
