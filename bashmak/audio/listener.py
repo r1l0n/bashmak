@@ -19,7 +19,7 @@ from typing import Awaitable, Callable
 import numpy as np
 
 from ..stt.whisper_worker import SttPool, Transcript
-from ..utils.logging import current_cid, guard, new_cid
+from ..utils.logging import current_cid, guard, new_cid, turn_start
 from .buffer import StreamRegistry
 from .sink import BashmakSink
 from .vad import Segment, Segmenter, SileroVad
@@ -246,6 +246,10 @@ class VoiceListener:
 
     async def _handle(self, segment: Segment, cid: str) -> None:
         current_cid.set(cid)
+        # Отчёт по реплике открывается здесь, а не на первой стадии: иначе из
+        # «всего» выпадала пауза, по которой фраза и закрылась, — то самое
+        # время, которое человек слышит как молчание бота.
+        turn_start(time.monotonic() - segment.ended_at)
         log.debug("фраза закрыта: user=%s, %.1f с", segment.user_id, segment.duration)
         try:
             transcript = await self._stt.transcribe(segment)

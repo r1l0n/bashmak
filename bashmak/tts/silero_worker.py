@@ -117,7 +117,7 @@ def _synthesize(text: str) -> tuple[bytes, int]:
 
     import numpy as np
 
-    rate = int(_PARAMS.get("sample_rate", 48000))
+    rate = int(_PARAMS.get("sample_rate", 24000))
     audio = _MODEL.apply_tts(
         text=text,
         speaker=_PARAMS.get("speaker", "aidar"),
@@ -140,7 +140,7 @@ class TtsPool:
 
         params = {
             "speaker": str(cfg.get("speaker", "aidar")),
-            "sample_rate": int(cfg.get("sample_rate", 48000)),
+            "sample_rate": int(cfg.get("sample_rate", 24000)),
             "put_accent": bool(cfg.get("put_accent", True)),
             "put_yo": bool(cfg.get("put_yo", True)),
             "threads": int(cfg.get("threads", 2)),

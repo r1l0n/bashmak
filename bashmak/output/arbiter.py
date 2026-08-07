@@ -284,50 +284,65 @@ class OutputArbiter:
 
     async def speak(self, chunks: AsyncIterator[tuple[bytes, int]]) -> None:
         """Проиграть поток кусков TTS и дождаться, пока всё прозвучит."""
-        async with self._lock:
-            epoch = self._epoch
-            pushed = 0
-            # Один ресемплер на реплику: покадровый stateless-пересчёт даёт
-            # щелчки на стыках предложений.
-            resampler: StreamResampler | None = None
+        # Поколение снимается до всего остального, включая лок: реплика,
+        # которую оборвали, пока она стояла в очереди на выход или пока
+        # синтезировался её первый кусок, звучать уже не должна.
+        epoch = self._epoch
 
-            # aclosing, а не голый async for: при выходе из цикла на середине
-            # генератор надо закрыть явно, иначе он останется висеть до GC.
-            async with contextlib.aclosing(chunks) as stream:
-                async for pcm, rate in stream:
+        # aclosing, а не голый async for: при выходе на середине генератор надо
+        # закрыть явно, иначе он останется висеть до GC. Снаружи лока — чтобы
+        # закрылся и тот, который бросили на первом же куске.
+        async with contextlib.aclosing(chunks) as stream:
+            # Первый кусок синтезируем, не дожидаясь очереди на голосовой выход.
+            # Пока доигрывает предыдущая реплика, воркер TTS всё равно свободен,
+            # а под локом этот синтез целиком лёг бы на время ответа.
+            chunk = await anext(stream, None)
+            if chunk is None or self._epoch != epoch:
+                return
+
+            async with self._lock:
+                pushed = 0
+                # Один ресемплер на реплику: покадровый stateless-пересчёт даёт
+                # щелчки на стыках предложений.
+                resampler: StreamResampler | None = None
+
+                while chunk is not None:
                     if self._epoch != epoch:
                         log.info("реплику оборвали — остаток не озвучиваю")
                         return
+                    pcm, rate = chunk
                     if resampler is None or resampler.in_rate != rate:
                         if resampler is not None:
                             pushed += self._push(resampler.flush())
                         resampler = StreamResampler(rate, DISCORD_RATE)
                     mono = to_float_mono(np.frombuffer(pcm, dtype="<i2"))
                     pushed += self._push(resampler.process(mono))
+                    chunk = await anext(stream, None)
 
-            if resampler is not None:
-                pushed += self._push(resampler.flush())
+                if resampler is not None:
+                    pushed += self._push(resampler.flush())
 
-            if not pushed or self._epoch != epoch:
-                return
+                if not pushed or self._epoch != epoch:
+                    return
 
-            # Ждать событие без таймаута нельзя: его выставляет поток плеера, а
-            # он крутится, только пока живо голосовое соединение. Оборвалось —
-            # и вся очередь LLM встала бы намертво до рестарта процесса.
-            timeout = pushed / BYTES_PER_SECOND + SPEAK_TIMEOUT_SLACK
-            try:
-                # Отдельной стадией: это самая долгая часть реплики (сколько
-                # длится сама фраза), без неё разбивка не сходится с «всего» и
-                # в отчёте выглядит, будто время ушло в никуда.
-                with stage(log, "речь", сек=f"{pushed / BYTES_PER_SECOND:.1f}"):
-                    await asyncio.wait_for(self.source.drained.wait(), timeout)
-            except asyncio.TimeoutError:
-                log.warning(
-                    "речь не доиграла за %.0f с — голосовой выход не крутится, "
-                    "сбрасываю буфер",
-                    timeout,
-                )
-                self.source.clear_tts()
+                # Ждать событие без таймаута нельзя: его выставляет поток плеера,
+                # а он крутится, только пока живо голосовое соединение.
+                # Оборвалось — и вся очередь LLM встала бы намертво до рестарта
+                # процесса.
+                timeout = pushed / BYTES_PER_SECOND + SPEAK_TIMEOUT_SLACK
+                try:
+                    # Отдельной стадией: это самая долгая часть реплики (сколько
+                    # длится сама фраза), без неё разбивка не сходится с «всего»
+                    # и в отчёте выглядит, будто время ушло в никуда.
+                    with stage(log, "речь", сек=f"{pushed / BYTES_PER_SECOND:.1f}"):
+                        await asyncio.wait_for(self.source.drained.wait(), timeout)
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "речь не доиграла за %.0f с — голосовой выход не крутится, "
+                        "сбрасываю буфер",
+                        timeout,
+                    )
+                    self.source.clear_tts()
 
     def _push(self, samples: np.ndarray) -> int:
         data = float_mono_to_discord_pcm(samples)

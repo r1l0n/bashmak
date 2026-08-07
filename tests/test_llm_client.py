@@ -14,6 +14,8 @@ import httpx
 import pytest
 
 from bashmak.llm.client import (
+    CHAT_SLOT,
+    INTENT_SLOT,
     MESSAGE_SEP,
     LlmClient,
     LlmError,
@@ -185,3 +187,22 @@ def test_other_requests_keep_the_full_output():
     _ask(client, [{"role": "user", "content": "включи Кино"}])
 
     assert sent["stop"] == [MESSAGE_SEP]
+
+
+def test_slot_is_passed_to_the_server():
+    """Диалог и классификатор считаются в разных слотах, у каждого свой кеш."""
+    client, sent = _capture()
+
+    _ask(client, [{"role": "user", "content": "включи Кино"}], slot=INTENT_SLOT)
+
+    assert sent["id_slot"] == INTENT_SLOT
+    assert INTENT_SLOT != CHAT_SLOT, "иначе слот один и кеш общий — смысла нет"
+
+
+def test_request_without_a_slot_lets_the_server_choose():
+    """Поле не должно появляться пустым: сборка без слотов на него ругается."""
+    client, sent = _capture()
+
+    _ask(client, [{"role": "user", "content": "включи Кино"}])
+
+    assert "id_slot" not in sent

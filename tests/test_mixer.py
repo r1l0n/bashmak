@@ -269,6 +269,65 @@ def test_speak_recovers_after_interrupt(loop, monkeypatch):
     assert consumed == ["кусок"], "следующая реплика обязана озвучиться как обычно"
 
 
+def test_first_chunk_is_synthesized_while_the_previous_reply_plays(loop, monkeypatch):
+    """Синтез следующей реплики не должен ждать освобождения голосового выхода.
+
+    Пока доигрывает предыдущая реплика, воркер TTS свободен. Если тянуть первый
+    кусок уже под локом арбитра, весь синтез ложится на время ответа — а это
+    самая заметная часть задержки при разговоре нескольких человек.
+    """
+    monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)
+    out = OutputArbiter(FakeConfig(), loop)
+    chunk = np.full(480, 1000, dtype="<i2").tobytes()
+    second_synthesized = asyncio.Event()
+
+    async def first():
+        yield chunk, 48000
+        # Лок арбитра всё ещё у этой реплики. Ждём, пока вторая насинтезирует
+        # свой первый кусок: если бы синтез шёл под локом, он бы не начался и
+        # здесь мы бы просто зависли до таймаута.
+        await asyncio.wait_for(second_synthesized.wait(), 2.0)
+
+    async def second():
+        second_synthesized.set()
+        yield chunk, 48000
+
+    async def main():
+        await asyncio.gather(out.speak(first()), out.speak(second()))
+
+    loop.run_until_complete(asyncio.wait_for(main(), 5.0))
+
+
+def test_interrupt_reaches_a_reply_waiting_for_its_turn(loop, monkeypatch):
+    """Команда молчания глушит и то, что ещё стоит в очереди на выход.
+
+    Поколение снимается в начале speak(), до лока: иначе реплика, дождавшаяся
+    своей очереди уже после «замолчи», взяла бы новое поколение и прозвучала.
+    """
+    monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)
+    out = OutputArbiter(FakeConfig(), loop)
+    chunk = np.full(480, 1000, dtype="<i2").tobytes()
+    waiting_started = asyncio.Event()
+    spoken: list[str] = []
+
+    async def first():
+        yield chunk, 48000
+        await asyncio.wait_for(waiting_started.wait(), 2.0)
+        out.interrupt()
+
+    async def second():
+        waiting_started.set()
+        yield chunk, 48000
+        spoken.append("вторая")
+
+    async def main():
+        await asyncio.gather(out.speak(first()), out.speak(second()))
+
+    loop.run_until_complete(asyncio.wait_for(main(), 5.0))
+
+    assert spoken == [], "после команды молчания ждавшая реплика звучать не должна"
+
+
 def test_speak_gives_up_when_player_is_dead(loop, monkeypatch):
     """Голосовое соединение отвалилось — speak() обязан отпустить очередь LLM."""
     monkeypatch.setattr(arbiter_module, "SPEAK_TIMEOUT_SLACK", 0.05)

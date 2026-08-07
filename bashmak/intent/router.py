@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass
 from enum import Enum
 
+from ..llm.client import INTENT_SLOT
 from ..utils.logging import stage
 
 log = logging.getLogger(__name__)
@@ -235,6 +236,9 @@ class IntentRouter:
                     max_tokens=64,
                     temperature=0.0,
                     json_schema=_SCHEMA,
+                    # Свой слот: системная часть у классификатора своя, и в
+                    # общем слоте она вытирала кеш префикса диалога.
+                    slot=INTENT_SLOT,
                 )
         except Exception:
             # Классификатор не критичен: не сработал — реплика идёт в диалог.

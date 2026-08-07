@@ -26,6 +26,9 @@ url = urlparse(llm.get("server_url", "http://127.0.0.1:8080"))
 for key, value in (
     ("MODEL",   llm.get("model_path", "")),
     ("THREADS", llm.get("threads", 4)),
+    # Пустое значение = не передавать флаг, у llama.cpp тогда своё умолчание
+    # (равное --threads).
+    ("TBATCH",  llm.get("threads_batch") or ""),
     ("CTX",     llm.get("context_size", 4096)),
     ("MLOCK",   "1" if llm.get("mlock") else ""),
     ("HOST",    url.hostname or "127.0.0.1"),
@@ -53,10 +56,18 @@ if [ -n "$MLOCK" ]; then
     # LimitMEMLOCK=infinity в юните — он это уже задаёт.
     EXTRA+=(--mlock)
 fi
+if [ -n "$TBATCH" ]; then
+    # Потоки на разбор промпта отдельно от потоков генерации. Разбор — короткий
+    # вычислительный всплеск и хорошо масштабируется по ядрам; генерация
+    # упирается в пропускную способность памяти и выходит на плато к шести-восьми
+    # потокам. По умолчанию llama.cpp приравнивает второе к первому, то есть
+    # держит разбор на заниженном числе ядер.
+    EXTRA+=(--threads-batch "$TBATCH")
+fi
 
 echo "llama-server: $BIN"
 echo "  модель:  $MODEL"
-echo "  потоки:  $THREADS, контекст: $CTX${MLOCK:+, mlock}"
+echo "  потоки:  $THREADS${TBATCH:+ (разбор промпта: $TBATCH)}, контекст: $CTX${MLOCK:+, mlock}"
 echo "  адрес:   http://$HOST:$PORT"
 
 # Только стабильные флаги: сборка llama.cpp обновляется скриптом установки
@@ -64,11 +75,17 @@ echo "  адрес:   http://$HOST:$PORT"
 # Шаблон чата не задаётся: бот ходит в /completion со своим готовым промптом
 # (bashmak/llm/client.py), мимо чат-слоя llama.cpp — тот на формате GigaChat
 # ломается и со штатным шаблоном, и со своим.
+#
+# --parallel 2 — не ради параллельного счёта (его держит от силы один запрос за
+# раз, см. LlmClient._inference), а ради второго кеша префикса: диалог и
+# классификатор намерений ходят с разными системными частями и в одном слоте
+# вытирали кеш друг другу. Контекст делится между слотами, 2048 на каждый —
+# с запасом: персона плюс несколько ходов истории плюс ответ.
 exec "$BIN" \
     --model "$MODEL" \
     --host "$HOST" \
     --port "$PORT" \
     --threads "$THREADS" \
     --ctx-size "$CTX" \
-    --parallel 1 \
+    --parallel 2 \
     "${EXTRA[@]}"

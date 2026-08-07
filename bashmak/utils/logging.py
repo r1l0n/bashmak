@@ -4,16 +4,21 @@
 сколько времени ушло на каждом шаге. Поэтому построчный лог стадий заменён на
 один блок по каждой реплике:
 
-    19:00:26 ┌─ участник ─ 6.1 с
+    19:00:26 ┌─ участник ─ 6.8 с
              │ слышу «привет.»
              │ в ЛЛМ «привет.»
              │ ответ «И тебе привет.»
-             └─ stt 0.8 ███  intent 0.0   llm 4.2 ████████████  tts 1.1 ████
+             └─ ожидание 0.7 ██  stt 0.8 ███  intent 0.0   llm 4.2 ████  tts 1.1 ██
 
 Каждой реплике присваивается correlation id (`cid`) вида ``u123456@41.2``, он
 контекстной переменной протаскивается через все стадии (sink → vad → stt →
 wake → intent → llm → tts → out). Стадии не пишут по строке каждая, а копятся
 в :class:`_Turn` под своим cid и печатаются разом, когда реплика отработала.
+
+Отсчёт ведётся от момента, когда человек договорил (:func:`turn_start`), а не
+от первой стадии: пауза, по которой фраза закрывается, и ожидание в очереди к
+модели — это ровно то время, которое слышно как молчание бота, и в замерах оно
+должно быть видно.
 
 Фоновые задачи оборачиваются в :func:`guard`, чтобы упавший таск не умирал
 молча: asyncio по умолчанию проглатывает исключения в задачах.
@@ -87,6 +92,15 @@ _STAGE_INDEX = re.compile(r"\[\d+\]$")
 #: intent-llm — тот же шаг разбора намерения, только через модель; в отчёте
 #: это одна строка «intent», а не две.
 _STAGE_TITLES = {"intent-llm": "intent"}
+
+#: Сколько прошло между «человек договорил» и стартом распознавания.
+#:
+#: Складывается из паузы, по которой закрывается фраза (vad.silence_ms плюс
+#: запас в listener.py), и ожидания свободного воркера STT. Считается снаружи,
+#: по Segment.ended_at, — своей секунды в коде у неё нет.
+WAIT_STAGE = "ожидание"
+#: Сколько реплика пролежала в очереди к LLM за чужим инференсом.
+QUEUE_STAGE = "очередь"
 
 
 @dataclass
@@ -181,6 +195,41 @@ def _turn() -> _Turn:
     return turn
 
 
+def turn_start(waited: float = 0.0) -> None:
+    """Открыть реплику, отсчитав её начало от конца фразы.
+
+    Без этого ``_Turn`` заводится на первой стадии, то есть на старте STT, и в
+    «всего» не попадает ни пауза, по которой фраза закрылась, ни ожидание
+    свободного воркера. То есть ровно то время, которое человек слышит как
+    молчание бота, в отчёте отсутствовало.
+
+    ``waited`` — разность двух ``time.monotonic()``, а вычитается она из
+    ``time.perf_counter()``. Это безопасно: используется именно длительность,
+    точки отсчёта у часов разные, но ход одинаковый.
+    """
+    waited = max(0.0, waited)
+    cid = current_cid.get()
+    turn = _Turn(started=time.perf_counter() - waited)
+    if waited:
+        turn.stages[WAIT_STAGE] = waited
+    _open_turns[cid] = turn
+    while len(_open_turns) > _MAX_OPEN_TURNS:
+        _open_turns.popitem(last=False)
+
+
+def turn_stage(name: str, seconds: float) -> None:
+    """Приплюсовать время стадии к отчёту по текущей реплике.
+
+    Зовётся из :func:`stage` и напрямую — для отрезков, которые контекстным
+    менеджером не обернуть: внутри них не выполняется никакой наш код, реплика
+    просто ждёт (пауза после фразы, очередь к модели).
+    """
+    key = _STAGE_INDEX.sub("", name)
+    key = _STAGE_TITLES.get(key, key)
+    stages = _turn().stages
+    stages[key] = stages.get(key, 0.0) + seconds
+
+
 def turn_note(**fields: str) -> None:
     """Дописать в отчёт по текущей реплике: speaker, heard, sent, reply."""
     turn = _turn()
@@ -262,7 +311,7 @@ def stage_summary(width: int = 20) -> list[str]:
     lines = [f"задержки по {len(_recent)} репликам (медиана):"]
     for name in names:
         bar = "█" * max(1, round(width * medians[name] / scale))
-        lines.append(f"  {name:<7} {medians[name]:>5.1f} с {bar}")
+        lines.append(f"  {name:<9} {medians[name]:>5.1f} с {bar}")
     return lines
 
 
@@ -344,23 +393,15 @@ def stage(logger: logging.Logger, name: str, **extra: Any) -> Iterator[dict[str,
         yield info
     except Exception:
         elapsed = time.perf_counter() - started
-        _record_stage(name, elapsed)
+        turn_stage(name, elapsed)
         logger.exception("%s: ОШИБКА через %.1f с%s", name, elapsed, _fmt(info))
         raise
     else:
         elapsed = time.perf_counter() - started
-        _record_stage(name, elapsed)
+        turn_stage(name, elapsed)
         # Построчно только на DEBUG: на INFO стадии уходят в общий отчёт по
         # реплике, иначе одна фраза занимает пол-экрана.
         logger.debug("%s: %.1f с%s", name, elapsed, _fmt(info))
-
-
-def _record_stage(name: str, seconds: float) -> None:
-    """Приплюсовать время стадии к отчёту по текущей реплике."""
-    key = _STAGE_INDEX.sub("", name)
-    key = _STAGE_TITLES.get(key, key)
-    stages = _turn().stages
-    stages[key] = stages.get(key, 0.0) + seconds
 
 
 def _fmt(info: dict[str, Any]) -> str:

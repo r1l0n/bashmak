@@ -26,8 +26,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
-from ..utils.logging import current_cid, guard, stage, turn_note
-from .client import LlmClient
+from ..utils.logging import QUEUE_STAGE, current_cid, guard, stage, turn_note, turn_stage
+from .client import CHAT_SLOT, LlmClient
 from .persona import build_messages, clean_reply
 
 log = logging.getLogger(__name__)
@@ -43,6 +43,11 @@ class ChatTask:
     speaker: str = field(compare=False, default="")
     text: str = field(compare=False, default="")
     cid: str = field(compare=False, default="-")
+    #: Момент постановки в очередь; проставляет submit(). Отдельно от ended_at:
+    #: тот задаёт приоритет, а этот нужен, чтобы отделить ожидание за чужим
+    #: инференсом от времени самого инференса. compare=False обязателен —
+    #: датакласс сравнивается только по ended_at, это и есть порядок ответов.
+    queued_at: float = field(compare=False, default=0.0)
 
 
 class LlmQueue:
@@ -93,6 +98,7 @@ class LlmQueue:
 
     # ------------------------------------------------------------- API ----
     async def submit(self, task: ChatTask) -> None:
+        task.queued_at = time.monotonic()
         await self._queue.put(task)
         log.debug("в очередь LLM: %r (глубина %d)", task.text, self._queue.qsize())
 
@@ -161,6 +167,11 @@ class LlmQueue:
                 self._queue.task_done()
 
     async def _handle(self, task: ChatTask) -> None:
+        # Сколько реплика простояла за чужим инференсом. Отдельной стадией,
+        # иначе это время растворяется в «всего» и выглядит как медленная LLM.
+        if task.queued_at:
+            turn_stage(QUEUE_STAGE, time.monotonic() - task.queued_at)
+
         # До запроса, а не после: если модель упадёт, в отчёте всё равно должно
         # быть видно, что именно ей отправляли. Без имени говорящего — оно
         # уходит в системную часть, а в шапке отчёта и так стоит.
@@ -173,6 +184,9 @@ class LlmQueue:
                 # Персона отвечает одним предложением: обрываем генерацию на
                 # его конце, а не досчитываем то, что clean_reply() выбросит.
                 one_sentence=True,
+                # Свой слот: классификатор намерений не должен вытирать кеш
+                # префикса диалога (см. CHAT_SLOT).
+                slot=CHAT_SLOT,
             )
             info["chars"] = len(raw)
 
