@@ -293,6 +293,20 @@ class LlmClient:
                     if response.status_code >= 400:
                         raise LlmError(_server_error(response))
                     data = response.json()
+                    # Без этого «llm 5.8 с» не отличить от «модель досчитала до
+                    # n_predict, а всё после первого предложения выбросил
+                    # clean_reply»: время одинаковое, лечится разным.
+                    log.debug(
+                        "LLM: %s/%s токенов, промпт %s, стоп %s",
+                        data.get("tokens_predicted"),
+                        payload["n_predict"],
+                        data.get("tokens_evaluated"),
+                        "лимит"
+                        if data.get("stopped_limit")
+                        else "стоп-строка"
+                        if data.get("stopped_word")
+                        else "eos",
+                    )
                     return _answer(data)
                 except (httpx.HTTPError, LlmError, KeyError, IndexError, ValueError) as exc:
                     last_error = exc
