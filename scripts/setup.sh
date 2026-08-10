@@ -6,10 +6,10 @@
 #
 # Скрипт идемпотентный: повторный запуск ничего не ломает и не перекачивает.
 #
-#   ./scripts/setup.sh                      # всё, профиль balanced
-#   ./scripts/setup.sh --profile qwen       # Qwen3-30B вместо GigaChat
-#   ./scripts/setup.sh --profile vikhr      # Vikhr-YandexGPT-8B: характер вместо скорости
-#   ./scripts/setup.sh --profile quality    # STT покрупнее (whisper medium)
+#   ./scripts/setup.sh                      # всё, профиль vikhr
+#   ./scripts/setup.sh --profile balanced   # GigaChat-20B вместо Vikhr
+#   ./scripts/setup.sh --profile qwen       # Qwen3-30B вместо Vikhr
+#   ./scripts/setup.sh --profile quality    # GigaChat + STT покрупнее (whisper medium)
 #   ./scripts/setup.sh --skip-models        # только окружение
 #   ./scripts/setup.sh --models-only        # только докачать модели
 #   ./scripts/setup.sh --systemd            # + установить и включить юниты
@@ -41,7 +41,7 @@ warn() { printf '    %s[warn]%s %s\n'   "$C_WARN" "$C_OFF" "$*" >&2; }
 die()  { printf '\n%s[fail]%s %s\n\n'   "$C_ERR"  "$C_OFF" "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------- флаги ----
-PROFILE=balanced
+PROFILE=vikhr
 DO_MODELS=1
 DO_ENV=1
 DO_SYSTEMD=0
@@ -64,10 +64,11 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Диалоговая модель по умолчанию: GigaChat-20B-A3B — MoE, из 20 млрд весов на
-# каждый токен считаются ~3 млрд. По скорости это уровень плотной
-# трёхмиллиардной модели, по качеству выше; русский у неё родной. Профили
-# fast/balanced/quality отличаются только размером STT, qwen меняет и LLM.
+# Диалоговая модель по умолчанию — Vikhr-YandexGPT-8B (профиль vikhr ниже):
+# выбрана за характер, а не за скорость. Профили fast/balanced/quality остались
+# на GigaChat-20B-A3B и отличаются между собой только размером STT; qwen меняет
+# и LLM. Возврат на GigaChat — --profile balanced плюс три ключа в config.yaml
+# (model_path, prompt_format, temperature), веса перекачивать не нужно.
 GIGACHAT_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
 GIGACHAT_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
 # Запасной репозиторий с тем же квантом, если основной переименовали или снесли.
