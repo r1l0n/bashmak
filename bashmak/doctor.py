@@ -138,7 +138,7 @@ async def _check_llm(client) -> str:  # noqa: ANN001 — LlmClient
 
 
 async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
-    """TTS синтезирует фразу, VAD признаёт её речью, Whisper читает обратно.
+    """TTS синтезирует фразу, VAD признаёт её речью, STT читает обратно.
 
     VAD включён в проверку потому, что при поломке он не падает, а молчит.
     Сломанный VAD выглядит как полностью рабочий бот, который никогда никого не
@@ -148,12 +148,12 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
     import soxr
 
     from .audio.vad import WINDOW_SAMPLES_16K, Segment, SileroVad
-    from .stt.whisper_worker import SttPool
+    from .stt import create_stt_pool
     from .tts.silero_worker import TtsPool
 
     phrase = "Башмак на связи, проверка звука."
     tts = TtsPool(cfg.tts)
-    stt = SttPool(cfg.stt)
+    stt = create_stt_pool(cfg.stt)
     try:
         pieces: list[np.ndarray] = []
         rate = 48000
@@ -188,7 +188,7 @@ async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
         stt.close()
 
     if transcript is None or not transcript.text.strip():
-        raise RuntimeError("Whisper не расслышал синтезированную фразу")
+        raise RuntimeError("движок STT не расслышал синтезированную фразу")
     return f"{audio.size / 16000:.1f} с → VAD {best:.2f} → {transcript.text.strip()!r}"
 
 
@@ -396,7 +396,13 @@ async def run(offline: bool) -> int:
     print("\n модели")
     report.check("VAD", lambda: _check_file(cfg.vad.path("model_path"), "silero"))
     report.check("LLM", lambda: _check_file(cfg.llm.path("model_path"), "gguf"))
-    report.check("STT", lambda: _check_file(cfg.stt.path("model_path"), "faster-whisper"))
+    # Путь к весам лежит в подсекции активного движка: у каждого он свой, и
+    # общего stt.model_path больше нет.
+    stt_engine = str(cfg.stt.get("engine", "gigaam")).strip().lower()
+    report.check(
+        f"STT ({stt_engine})",
+        lambda: _check_file(cfg.stt.get(stt_engine).path("model_path"), stt_engine),
+    )
     report.check("TTS", lambda: _check_file(cfg.tts.path("model_path"), "silero-tts"))
     report.check("llama-server", lambda: _check_llama_binary(cfg.root))
 

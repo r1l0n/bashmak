@@ -1,5 +1,8 @@
-# Python 3.10–3.12. На 3.13+ нет колёс ctranslate2/onnxruntime, setup.sh
-# проверяет это заранее.
+# Python 3.10–3.12, setup.sh проверяет это заранее.
+#
+# Границу держит ctranslate2 из faster-whisper — движка STT, оставленного как
+# путь отката. Рабочий движок (onnx-asr) и onnxruntime колёса под 3.13+ имеют,
+# так что вместе с отказом от whisper уходит и верхняя граница.
 
 # Discord + приём голоса. Обе версии закреплены точно.
 #
@@ -25,7 +28,16 @@ discord.py[voice]==2.7.1
 # одном venv несовместимы. setup.sh снимает py-cord перед установкой.
 discord-ext-voice-recv==0.5.2a179
 
-# STT
+# STT — GigaAM (Conformer от SberDevices) поверх onnxruntime.
+#
+# Пакет на чистом python, из зависимостей у него только numpy и onnxruntime,
+# которые здесь и так стоят ради VAD. Ни torch, ни transformers он не тянет.
+onnx-asr>=0.12
+
+# STT, движок отката: stt.engine: whisper. Держится не ради симметрии — это
+# единственная стадия, поломка которой не видна в логе (бот не падает, он
+# перестаёт понимать людей), и возврат правкой строки конфига стоит дешевле
+# сэкономленных ~40 МБ ctranslate2. Он же держит верхнюю границу Python.
 faster-whisper>=1.1
 
 # VAD — silero_vad.onnx запускается напрямую в onnxruntime.

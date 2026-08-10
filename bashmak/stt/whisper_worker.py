@@ -1,4 +1,9 @@
-"""STT: faster-whisper в пуле процессов.
+"""STT: faster-whisper в пуле процессов. Запасной движок, путь отката.
+
+По умолчанию распознаёт GigaAM (``stt.engine: gigaam``, см. gigaam_worker.py):
+на русском он точнее и не платит за дополнение окна до 30 секунд. Этот модуль
+остаётся рабочим, чтобы вернуться на whisper правкой одной строки конфига,
+если GigaAM не справится с конкретным звуком, — веса при этом уже лежат рядом.
 
 Распознавание CPU-bound, и внутри одного процесса GIL не даёт считать двух
 говорящих параллельно. Поэтому пул процессов, а не потоков, и в каждом
@@ -14,13 +19,13 @@ import asyncio
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from ..audio.vad import Segment
 from ..utils.logging import stage
+from . import Transcript
 
 log = logging.getLogger(__name__)
 
@@ -83,22 +88,7 @@ def _transcribe(
     return text, avg_logprob, no_speech_prob
 
 
-@dataclass(slots=True)
-class Transcript:
-    user_id: int
-    text: str
-    duration: float
-    avg_logprob: float
-    #: time.monotonic() на момент конца фразы — переносится из Segment как есть.
-    #: Именно по нему очередь LLM расставляет приоритет: «кто первым договорил,
-    #: тому первым и отвечаем». Если подставить сюда текущее время, порядок
-    #: начнёт определять скорость распознавания — ровно то, чего очередь
-    #: пытается избежать. Без значения по умолчанию намеренно: забытое поле
-    #: должно падать на месте, а не превращаться в ноль и тихо ломать порядок.
-    ended_at: float
-
-
-class SttPool:
+class WhisperPool:
     """Асинхронный фасад над пулом процессов."""
 
     def __init__(self, cfg) -> None:  # noqa: ANN001 — bashmak.config.Section

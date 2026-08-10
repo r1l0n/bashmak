@@ -9,7 +9,8 @@
 #   ./scripts/setup.sh                      # всё, профиль vikhr
 #   ./scripts/setup.sh --profile balanced   # GigaChat-20B вместо Vikhr
 #   ./scripts/setup.sh --profile qwen       # Qwen3-30B вместо Vikhr
-#   ./scripts/setup.sh --profile quality    # GigaChat + STT покрупнее (whisper medium)
+#   ./scripts/setup.sh --profile quality    # алиас balanced, оставлен для совместимости
+#   ./scripts/setup.sh --with-whisper       # + веса whisper как путь отката STT
 #   ./scripts/setup.sh --skip-models        # только окружение
 #   ./scripts/setup.sh --models-only        # только докачать модели
 #   ./scripts/setup.sh --systemd            # + установить и включить юниты
@@ -48,6 +49,7 @@ DO_SYSTEMD=0
 DO_TUNNEL=0
 DO_VPN=0
 FORCE=0
+WITH_WHISPER=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -58,8 +60,9 @@ while [ $# -gt 0 ]; do
         --systemd)     DO_SYSTEMD=1; shift ;;
         --tunnel)      DO_TUNNEL=1; DO_SYSTEMD=1; shift ;;
         --vpn)         DO_VPN=1; DO_TUNNEL=1; DO_SYSTEMD=1; shift ;;
+        --with-whisper) WITH_WHISPER=1; shift ;;
         --force)       FORCE=1; shift ;;
-        -h|--help)     sed -n '2,25p' "$0"; exit 0 ;;
+        -h|--help)     sed -n '2,24p' "$0"; exit 0 ;;
         *)             die "неизвестный флаг: $1 (см. --help)" ;;
     esac
 done
@@ -77,14 +80,15 @@ LLM_REPO_ALT=""
 # промпт сам (llm.prompt_format в config.yaml, bashmak/llm/client.py).
 LLM_FORMAT=gigachat
 
+# Распознавание одно на все профили. Раньше оно делилось на small и medium, и
+# профиль выбирал компромисс «точность против задержки»; с GigaAM выбирать не
+# из чего — вариант v3-e2e-rnnt разом и точнее whisper-medium, и дешевле
+# whisper-small, так что профиль снова означает только выбор LLM.
+STT_MODEL="gigaam-v3-e2e-rnnt"
+
 case "$PROFILE" in
-    fast|balanced)
+    fast|balanced|quality)
         LLM_REPO="$GIGACHAT_REPO"; LLM_FILE="$GIGACHAT_FILE"
-        STT_REPO="Systran/faster-whisper-small"
-        ;;
-    quality)
-        LLM_REPO="$GIGACHAT_REPO"; LLM_FILE="$GIGACHAT_FILE"
-        STT_REPO="Systran/faster-whisper-medium"
         ;;
     qwen)
         # Тоже MoE с ~3 млрд активных весов, по скорости примерно как GigaChat.
@@ -95,7 +99,6 @@ case "$PROFILE" in
         LLM_REPO="unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF"
         LLM_REPO_ALT="bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF"
         LLM_FILE="Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
-        STT_REPO="Systran/faster-whisper-small"
         ;;
     vikhr)
         # Плотная восьмимиллиардная: на каждый токен считаются все 8 млрд весов
@@ -113,12 +116,22 @@ case "$PROFILE" in
         LLM_REPO_ALT="tensorblock/Vikhrmodels_Vikhr-YandexGPT-5-Lite-8B-it-GGUF"
         LLM_FILE="Vikhr-YandexGPT-5-Lite-8B-it-Q4_K_M.gguf"
         LLM_FORMAT=vikhr
-        STT_REPO="Systran/faster-whisper-small"
         ;;
     *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality | qwen | vikhr)" ;;
 esac
 
-STT_DIR="models/stt/$(basename "$STT_REPO")"
+# Имена файлов внутри репозитория начинаются с варианта модели без «gigaam-» и
+# через подчёркивания: gigaam-v3-e2e-rnnt -> v3_e2e_rnnt_{encoder,decoder,joint}.onnx.
+STT_PREFIX="$(printf '%s' "${STT_MODEL#gigaam-}" | tr '-' '_')"
+case "$STT_MODEL" in
+    gigaam-v2-*) STT_REPO="istupakov/gigaam-v2-onnx" ;;
+    gigaam-v3-*) STT_REPO="istupakov/gigaam-v3-onnx" ;;
+    *) die "неизвестный вариант STT '$STT_MODEL' (ожидается gigaam-v2-* или gigaam-v3-*)" ;;
+esac
+STT_DIR="models/stt/$STT_MODEL"
+# Движок отката, качается только по --with-whisper (см. fetch_whisper).
+WHISPER_REPO="Systran/faster-whisper-small"
+WHISPER_DIR="models/stt/faster-whisper-small"
 TTS_MODEL="models/tts/v5_5_ru.pt"
 TTS_URL="https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
 VAD_URL="https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
@@ -345,7 +358,7 @@ PY
 }
 
 hf_get_repo() {
-    # repo, dest_dir — только то, что нужно ctranslate2
+    # repo, dest_dir — только то, что нужно ctranslate2 (движок отката)
     "$PY" - "$1" "$2" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
@@ -354,6 +367,24 @@ print(snapshot_download(
     repo_id=repo,
     local_dir=dest,
     allow_patterns=["*.bin", "*.json", "*.txt", "*.model"],
+))
+PY
+}
+
+hf_get_gigaam() {
+    # repo, префикс варианта, dest_dir — веса ONNX выбранного варианта
+    "$PY" - "$1" "$2" "$3" <<'PY'
+import sys
+from huggingface_hub import snapshot_download
+repo, prefix, dest = sys.argv[1:4]
+print(snapshot_download(
+    repo_id=repo,
+    local_dir=dest,
+    # Из весов — только выбранный вариант, но оба кванта: float32 и int8.
+    # Лишние 226 МБ окупаются тем, что сверить их между собой можно правкой
+    # stt.gigaam.quantization, не перекачивая ничего. Словари и config.json
+    # весят килобайты, поэтому берутся целиком.
+    allow_patterns=[f"{prefix}*.onnx", "*.txt", "*.json"],
 ))
 PY
 }
@@ -423,15 +454,35 @@ fetch_llm() {
        Проверьте имя на huggingface.co и поправьте LLM_REPO в $0"
 }
 
+stt_weights_present() {
+    # Веса варианта разложены по нескольким .onnx (у rnnt их три), поэтому
+    # проверяется не конкретное имя файла, а что хоть один из них есть.
+    compgen -G "$STT_DIR/${STT_PREFIX}*.onnx" >/dev/null 2>&1
+}
+
 fetch_stt() {
-    if [ "$FORCE" -eq 0 ] && [ -s "$STT_DIR/model.bin" ]; then
+    if [ "$FORCE" -eq 0 ] && stt_weights_present; then
         skip "STT уже на месте ($STT_DIR)"
         return
     fi
-    ok "качаю STT $STT_REPO"
-    hf_get_repo "$STT_REPO" "$STT_DIR" >/dev/null
-    [ -s "$STT_DIR/model.bin" ] || die "в $STT_DIR нет model.bin"
+    ok "качаю STT $STT_MODEL из $STT_REPO (около 1.1 ГБ: float32 и int8)"
+    hf_get_gigaam "$STT_REPO" "$STT_PREFIX" "$STT_DIR" >/dev/null
+    stt_weights_present || die "в $STT_DIR нет весов ${STT_PREFIX}*.onnx"
     ok "STT: $STT_DIR"
+}
+
+fetch_whisper() {
+    # Движок отката. По умолчанию не качается: он нужен, только если GigaAM
+    # не справится с конкретным звуком, а это выясняется уже на живом канале.
+    [ "$WITH_WHISPER" -eq 1 ] || return 0
+    if [ "$FORCE" -eq 0 ] && [ -s "$WHISPER_DIR/model.bin" ]; then
+        skip "whisper уже на месте ($WHISPER_DIR)"
+        return
+    fi
+    ok "качаю whisper $WHISPER_REPO (движок отката, около 490 МБ)"
+    hf_get_repo "$WHISPER_REPO" "$WHISPER_DIR" >/dev/null
+    [ -s "$WHISPER_DIR/model.bin" ] || die "в $WHISPER_DIR нет model.bin"
+    ok "whisper: $WHISPER_DIR — включается ключом stt.engine: whisper"
 }
 
 fetch_tts() {
@@ -463,6 +514,7 @@ fetch_models() {
     fetch_vad
     fetch_llm
     fetch_stt
+    fetch_whisper
     fetch_tts
 }
 
@@ -480,6 +532,16 @@ setup_config() {
             warn "в config.yaml другая модель TTS — впишите в секцию tts:"
             warn "    model_path: $TTS_MODEL"
         fi
+        # Секция stt: переехала на подсекции движков. Старый плоский вид не
+        # ломает запуск — незнакомые ключи config.py только логирует, — но
+        # настройки из него молча перестают действовать, а это ровно тот отказ,
+        # который не видно: бот работает и просто хуже слышит.
+        if ! grep -q "^  engine:" config.yaml; then
+            warn "config.yaml от прежней версии: в секции stt: нет ключа engine."
+            warn "Настройки STT переехали в подсекции stt.gigaam и stt.whisper —"
+            warn "перенесите их по образцу config.example.yaml, иначе прежние"
+            warn "значения перестанут действовать (бот при этом запустится)."
+        fi
     else
         cp config.example.yaml config.yaml
         # Подставляем пути и профиль под то, что реально скачали.
@@ -487,7 +549,8 @@ setup_config() {
             -e "s|^profile: .*|profile: $PROFILE|" \
             -e "s|^  model_path: models/llm/.*|  model_path: models/llm/$LLM_FILE|" \
             -e "s|^  prompt_format: .*|  prompt_format: $LLM_FORMAT|" \
-            -e "s|^  model_path: models/stt/.*|  model_path: $STT_DIR|" \
+            -e "s|^    model: gigaam.*|    model: $STT_MODEL|" \
+            -e "s|^    model_path: models/stt/gigaam.*|    model_path: $STT_DIR|" \
             -e "s|^  model_path: models/tts/.*|  model_path: $TTS_MODEL|" \
             config.yaml
         ok "config.yaml создан из шаблона"

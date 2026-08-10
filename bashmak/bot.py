@@ -33,7 +33,7 @@ from .llm.queue_manager import ChatTask, LlmQueue
 from .music import search as music_search
 from .music.player import MusicPlayer
 from .output.arbiter import OutputArbiter
-from .stt.whisper_worker import SttPool, Transcript
+from .stt import SttPool, Transcript, create_stt_pool
 from .tts.silero_worker import TtsPool
 from .utils.logging import (
     current_cid,
@@ -242,7 +242,7 @@ class BashmakBot(discord.Client):
         self.tree.interaction_check = self._log_command
         self.tree.on_error = self._on_command_error
 
-        self.stt = SttPool(cfg.stt)
+        self.stt = create_stt_pool(cfg.stt)
         self.tts = TtsPool(cfg.tts)
         self.llm = LlmClient(cfg.llm)
         self.wakeword = WakeWordFilter(cfg.wakeword)

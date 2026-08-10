@@ -18,7 +18,7 @@ from typing import Awaitable, Callable
 
 import numpy as np
 
-from ..stt.whisper_worker import SttPool, Transcript
+from ..stt import SttPool, Transcript
 from ..utils.logging import current_cid, guard, new_cid, turn_start
 from .buffer import StreamRegistry
 from .sink import BashmakSink
