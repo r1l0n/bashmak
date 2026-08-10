@@ -1,7 +1,8 @@
-"""TTS: Silero v4 (ru) в пуле процессов.
+"""TTS: Silero v5 (ru) в пуле процессов.
 
 Выбран вместо Piper: у Piper для русского все голоса «medium» и звучат
-синтетично, Silero ставит ударения и произносит «ё». Цена — torch в
+синтетично, Silero ставит ударения, произносит «ё», снимает омографы
+(за́мок / замо́к) и держит вопросительную интонацию. Цена — torch в
 зависимостях и загрузка модели в каждый процесс-воркер, поэтому по умолчанию
 ``workers: 1``.
 
@@ -19,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import multiprocessing
 import re
@@ -94,6 +96,37 @@ def split_sentences(text: str, max_chars: int = 220) -> list[str]:
     return chunks
 
 
+def _accepted_kwargs(func) -> set[str] | None:  # noqa: ANN001 — метод из torch.package
+    """Имена именованных аргументов func. None — если проверить нечем."""
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):  # pragma: no cover — сигнатура нечитаема
+        return None
+    kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in signature.parameters.values()):
+        return None  # **kwargs принимает что угодно, отсеивать нечего
+    return {name for name, p in signature.parameters.items() if p.kind in kinds}
+
+
+def _drop_unsupported(params: dict) -> None:
+    """Выбросить ключи put_*, которых нет в apply_tts этой модели.
+
+    Набор put_* меняется от версии к версии: омографы (put_stress_homo,
+    put_yo_homo) появились только в v5. Лишний kwarg — это TypeError в воркере,
+    а GuildSession.say ловит любое исключение и лишь пишет в лог, так что
+    несовпадение конфига и версии модели выглядит как молчащий бот. Дешевле
+    сверить один раз на старте — как resample.py щупает soxr.ResampleStream.
+    """
+    allowed = _accepted_kwargs(_MODEL.apply_tts)
+    if allowed is None:
+        return
+    dropped = [key for key in params if key.startswith("put_") and key not in allowed]
+    for key in dropped:
+        del params[key]
+    if dropped:
+        log.warning("модель не принимает %s — параметры пропущены", ", ".join(sorted(dropped)))
+
+
 def _init_worker(model_path: str, params: dict) -> None:
     global _MODEL, _PARAMS
     import torch
@@ -104,6 +137,7 @@ def _init_worker(model_path: str, params: dict) -> None:
     # код, и веса, поэтому грузится importer'ом, а не torch.load.
     _MODEL = torch.package.PackageImporter(model_path).load_pickle("tts_models", "model")
     _MODEL.to(torch.device("cpu"))
+    _drop_unsupported(params)
     _PARAMS = params
     # Первый вызов torch тратит секунды на прогрев (аллокаторы, ядра). Эти
     # секунды должны уйти в старт бота, а не в первый ответ пользователю.
@@ -118,13 +152,15 @@ def _synthesize(text: str) -> tuple[bytes, int]:
     import numpy as np
 
     rate = int(_PARAMS.get("sample_rate", 24000))
-    audio = _MODEL.apply_tts(
-        text=text,
-        speaker=_PARAMS.get("speaker", "aidar"),
-        sample_rate=rate,
-        put_accent=bool(_PARAMS.get("put_accent", True)),
-        put_yo=bool(_PARAMS.get("put_yo", True)),
-    )
+    kwargs = {
+        "text": text,
+        "speaker": _PARAMS.get("speaker", "aidar"),
+        "sample_rate": rate,
+    }
+    # Словарём, а не списком именованных аргументов: _drop_unsupported уже вычистил
+    # отсюда всё, чего эта версия модели не понимает.
+    kwargs.update({key: bool(value) for key, value in _PARAMS.items() if key.startswith("put_")})
+    audio = _MODEL.apply_tts(**kwargs)
     samples = np.asarray(audio.numpy(), dtype=np.float32)
     pcm = np.clip(samples * 32767.0, -32768, 32767).astype("<i2")
     return pcm.tobytes(), rate
@@ -143,6 +179,8 @@ class TtsPool:
             "sample_rate": int(cfg.get("sample_rate", 24000)),
             "put_accent": bool(cfg.get("put_accent", True)),
             "put_yo": bool(cfg.get("put_yo", True)),
+            "put_stress_homo": bool(cfg.get("put_stress_homo", True)),
+            "put_yo_homo": bool(cfg.get("put_yo_homo", True)),
             "threads": int(cfg.get("threads", 2)),
         }
         workers = int(cfg.get("workers", 1))

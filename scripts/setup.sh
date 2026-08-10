@@ -119,8 +119,8 @@ case "$PROFILE" in
 esac
 
 STT_DIR="models/stt/$(basename "$STT_REPO")"
-TTS_MODEL="models/tts/v4_ru.pt"
-TTS_URL="https://models.silero.ai/models/tts/ru/v4_ru.pt"
+TTS_MODEL="models/tts/v5_5_ru.pt"
+TTS_URL="https://models.silero.ai/models/tts/ru/v5_5_ru.pt"
 VAD_URL="https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
 VENV="$ROOT/.venv"
 PY="$VENV/bin/python"
@@ -440,7 +440,7 @@ fetch_tts() {
         return
     fi
     mkdir -p models/tts
-    ok "качаю Silero TTS v4 ru (60 МБ)"
+    ok "качаю Silero TTS v5 ru (139 МБ)"
     curl -fsSL -o "$TTS_MODEL" "$TTS_URL"
     [ -s "$TTS_MODEL" ] || die "модель Silero TTS не скачалась"
     ok "TTS: $TTS_MODEL"
@@ -472,6 +472,14 @@ setup_config() {
 
     if [ -f config.yaml ]; then
         skip "config.yaml уже есть — не трогаю"
+        # Чужой config.yaml не переписываем, но о рассинхроне предупреждаем:
+        # после смены версии модели новая скачается (файла-то нет), а конфиг
+        # продолжит указывать на лежащую рядом старую. Бот при этом работает,
+        # просто озвучивает не тем, чем думает администратор.
+        if ! grep -q "^  model_path: $TTS_MODEL\$" config.yaml; then
+            warn "в config.yaml другая модель TTS — впишите в секцию tts:"
+            warn "    model_path: $TTS_MODEL"
+        fi
     else
         cp config.example.yaml config.yaml
         # Подставляем пути и профиль под то, что реально скачали.

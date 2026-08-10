@@ -179,8 +179,8 @@ llm:
   stale_task_s: 45
 
 tts:
-  # Silero TTS v4, русский. Ставит ударения и произносит «ё».
-  model_path: models/tts/v4_ru.pt
+  # Silero TTS v5, русский. Ставит ударения, произносит «ё», снимает омографы.
+  model_path: models/tts/v5_5_ru.pt
   # Мужские: aidar, eugene. Женские: baya, kseniya, xenia.
   speaker: aidar
   # 48000 совпало бы с частотой Discord, и ресемпла на выходе не было бы — но
@@ -191,6 +191,10 @@ tts:
   sample_rate: 24000
   put_accent: true
   put_yo: true
+  # Омографы: «за́мок» или «замо́к» — по смыслу фразы, а не по первому попавшемуся
+  # варианту. Появились в v5; на модели постарее воркер их молча отбросит.
+  put_stress_homo: true
+  put_yo_homo: true
   workers: 1
   # Потоки torch в каждом воркере. Остальные ядра нужны STT и llama-server.
   threads: 2
