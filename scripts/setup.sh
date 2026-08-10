@@ -8,6 +8,7 @@
 #
 #   ./scripts/setup.sh                      # всё, профиль balanced
 #   ./scripts/setup.sh --profile qwen       # Qwen3-30B вместо GigaChat
+#   ./scripts/setup.sh --profile vikhr      # Vikhr-YandexGPT-8B: характер вместо скорости
 #   ./scripts/setup.sh --profile quality    # STT покрупнее (whisper medium)
 #   ./scripts/setup.sh --skip-models        # только окружение
 #   ./scripts/setup.sh --models-only        # только докачать модели
@@ -71,6 +72,9 @@ GIGACHAT_REPO="ai-sage/GigaChat-20B-A3B-instruct-v1.5-GGUF"
 GIGACHAT_FILE="GigaChat-20B-A3B-instruct-v1.5-q4_K_M.gguf"
 # Запасной репозиторий с тем же квантом, если основной переименовали или снесли.
 LLM_REPO_ALT=""
+# Разделители ролей в промпте — свои у каждого семейства моделей, бот собирает
+# промпт сам (llm.prompt_format в config.yaml, bashmak/llm/client.py).
+LLM_FORMAT=gigachat
 
 case "$PROFILE" in
     fast|balanced)
@@ -92,7 +96,25 @@ case "$PROFILE" in
         LLM_FILE="Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf"
         STT_REPO="Systran/faster-whisper-small"
         ;;
-    *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality | qwen)" ;;
+    vikhr)
+        # Плотная восьмимиллиардная: на каждый токен считаются все 8 млрд весов
+        # против ~3 млрд у GigaChat. Файл вдвое меньше, но генерация примерно
+        # вдвое медленнее — на CPU её ограничивает не размер файла, а сколько
+        # весов читается из памяти на токен. Брать её имеет смысл только ради
+        # характера: это SFT поверх pretrain-базы YandexGPT, без выравнивания
+        # Яндекса, и персона проходит без отказов и извинений.
+        #
+        # Взамен два тюнинга в config.yaml, автоматически они не поедут:
+        # temperature 0.5–0.7 вместо 1.1 (карточка обещает артефакты на 1.0+) и
+        # присмотр за многословием — датасет у неё с Chain-of-Thought, модель
+        # тянет начать с преамбулы вместо ответа.
+        LLM_REPO="Vikhrmodels/Vikhr-YandexGPT-5-Lite-8B-it_GGUF"
+        LLM_REPO_ALT="tensorblock/Vikhrmodels_Vikhr-YandexGPT-5-Lite-8B-it-GGUF"
+        LLM_FILE="Vikhr-YandexGPT-5-Lite-8B-it-Q4_K_M.gguf"
+        LLM_FORMAT=vikhr
+        STT_REPO="Systran/faster-whisper-small"
+        ;;
+    *) die "неизвестный профиль '$PROFILE' (fast | balanced | quality | qwen | vikhr)" ;;
 esac
 
 STT_DIR="models/stt/$(basename "$STT_REPO")"
@@ -388,7 +410,7 @@ fetch_llm() {
 
     local repo
     for repo in "$LLM_REPO" ${LLM_REPO_ALT:+"$LLM_REPO_ALT"}; do
-        ok "качаю LLM $repo (12–18 ГБ, это надолго)"
+        ok "качаю LLM $repo (5–18 ГБ в зависимости от профиля, это надолго)"
         if try_fetch_llm_from "$repo"; then
             [ -s "$target" ] || die "GGUF не скачался: $target"
             ok "LLM: $target ($(du -h "$target" 2>/dev/null | cut -f1))"
@@ -455,6 +477,7 @@ setup_config() {
         sed -i \
             -e "s|^profile: .*|profile: $PROFILE|" \
             -e "s|^  model_path: models/llm/.*|  model_path: models/llm/$LLM_FILE|" \
+            -e "s|^  prompt_format: .*|  prompt_format: $LLM_FORMAT|" \
             -e "s|^  model_path: models/stt/.*|  model_path: $STT_DIR|" \
             -e "s|^  model_path: models/tts/.*|  model_path: $TTS_MODEL|" \
             config.yaml

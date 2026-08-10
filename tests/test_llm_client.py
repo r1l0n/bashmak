@@ -1,8 +1,10 @@
-"""Промпт для llama-server: форма messages и сборка формата GigaChat.
+"""Промпт для llama-server: форма messages и сборка под формат модели.
 
-Формат собираем сами и шлём в /completion — чат-слой llama.cpp на нём
-ломается (подробности в client.render_prompt). Значит, за корректность
-разделителей теперь отвечаем мы, и проверять её нужно здесь.
+Промпт собираем сами и шлём в /completion — чат-слой llama.cpp на формате
+GigaChat ломается (подробности в client._render_gigachat). Значит, за
+корректность разделителей отвечаем мы, и проверять её нужно здесь: моделей
+несколько, разделители у каждой свои, а перепутанный формат не роняет запрос —
+модель просто перестаёт видеть границы ходов.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from bashmak.llm.client import (
     CHAT_SLOT,
     INTENT_SLOT,
     MESSAGE_SEP,
+    TURN_END,
     LlmClient,
     LlmError,
     _answer,
@@ -106,6 +109,60 @@ def test_every_user_turn_gets_the_functions_block():
     assert "assistant<|role_sep|>2<|message_sep|>user<|role_sep|>3" in prompt
 
 
+# ------------------------------------------------------- формат Vikhr ----
+
+
+def test_vikhr_prompt_matches_the_reference_format():
+    """Эталон — шаблон из карточки модели: роль строкой, </s> в конце хода."""
+    prompt = render_prompt(
+        [{"role": "system", "content": "S"}, {"role": "user", "content": "V: q"}],
+        "vikhr",
+    )
+
+    assert prompt == "system\nS</s>\n<s>user\nV: q</s>\n<s>assistant\n"
+
+
+def test_vikhr_prompt_opens_every_turn_but_the_first():
+    """<s> — разделитель хода, но первый BOS сервер ставит сам."""
+    prompt = render_prompt(
+        [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "1"},
+            {"role": "assistant", "content": "2"},
+            {"role": "user", "content": "3"},
+        ],
+        "vikhr",
+    )
+
+    assert not prompt.startswith("<s>")
+    # Три хода после системного плюс затравка ответа.
+    assert prompt.count("<s>") == 4
+    assert prompt.count(TURN_END) == 4
+    assert prompt.endswith("<s>assistant\n")
+
+
+def test_unknown_prompt_format_is_rejected():
+    with pytest.raises(LlmError):
+        render_prompt([{"role": "user", "content": "q"}], "chatml")
+
+
+def test_client_refuses_an_unknown_prompt_format_at_startup():
+    """Опечатка в конфиге должна падать на старте, а не в голосовом канале."""
+    with pytest.raises(LlmError):
+        LlmClient(FakeSection(prompt_format="gigachad"))
+
+
+def test_vikhr_client_stops_at_its_own_turn_end():
+    """Стоп-маркер идёт за форматом: <|message_sep|> для Vikhr ничего не значит."""
+    client, sent = _capture(prompt_format="vikhr")
+
+    _ask(client, build_messages("Вася", "как дела"), one_sentence=True)
+
+    assert TURN_END in sent["stop"]
+    assert MESSAGE_SEP not in sent["stop"]
+    assert sent["prompt"].startswith("system\n")
+
+
 # ------------------------------------------ обрыв на конце предложения ----
 #
 # Генерацию сверх первого предложения всё равно выбрасывает clean_reply, но
@@ -136,7 +193,7 @@ def test_sentence_mark_is_restored(content, stopping_word, want):
     assert _answer(data) == want
 
 
-def _capture():
+def _capture(**settings):
     """Клиент с подменённым транспортом: запоминает, что ушло на сервер."""
     sent: dict = {}
 
@@ -144,7 +201,7 @@ def _capture():
         sent.update(json.loads(request.content))
         return httpx.Response(200, json={"content": "Ответ", "stopping_word": ""})
 
-    client = LlmClient(FakeSection())
+    client = LlmClient(FakeSection(**settings))
     client._client = httpx.AsyncClient(
         transport=httpx.MockTransport(handler), base_url="http://llm.test"
     )

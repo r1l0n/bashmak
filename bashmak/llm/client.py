@@ -20,6 +20,9 @@ class LlmError(RuntimeError):
 ROLE_SEP = "<|role_sep|>"
 MESSAGE_SEP = "<|message_sep|>"
 
+#: Конец хода у Vikhr-YandexGPT. Тоже EOS, роль <|message_sep|> в своём формате.
+TURN_END = "</s>"
+
 #: Слоты llama-server: у каждого свой кеш префикса промпта.
 #:
 #: Диалог и классификатор намерений ходят в одну модель, но с совершенно
@@ -31,7 +34,7 @@ CHAT_SLOT = 0
 INTENT_SLOT = 1
 
 
-def render_prompt(messages: list[dict[str, str]]) -> str:
+def _render_gigachat(messages: list[dict[str, str]]) -> str:
     """Собрать промпт в формате GigaChat.
 
     Вручную, а не через /v1/chat/completions: чат-слой llama.cpp этот формат не
@@ -57,6 +60,52 @@ def render_prompt(messages: list[dict[str, str]]) -> str:
             parts.append(f"available functions{ROLE_SEP}[]{MESSAGE_SEP}")
     parts.append(f"assistant{ROLE_SEP}")
     return "".join(parts)
+
+
+def _render_vikhr(messages: list[dict[str, str]]) -> str:
+    """Собрать промпт в формате Vikhr-YandexGPT.
+
+    Шаблон обычный, роль отдельной строкой и системная часть своим блоком::
+
+        system\\n{системная часть}</s>\\n<s>user\\n{реплика}</s>\\n<s>assistant\\n
+
+    Своя системная роль здесь важнее, чем кажется: она стоит первой и целиком
+    попадает в кеш префикса llama-server. У самой YandexGPT-5-Lite системного
+    блока нет, там инструкции пришлось бы вклеивать в первую реплику
+    пользователя — то есть в тот ход, который первым и вытесняется из истории,
+    и персона пересчитывалась бы заново после каждого забытого хода.
+
+    ``<s>`` тут разделитель каждого хода, а не только начало промпта, но первый
+    всё равно не пишется — BOS сервер ставит сам (см. :func:`_render_gigachat`).
+    """
+    parts: list[str] = []
+    for index, message in enumerate(messages):
+        opener = "" if index == 0 else "<s>"
+        parts.append(f"{opener}{message['role']}\n{message['content']}{TURN_END}\n")
+    parts.append("<s>assistant\n")
+    return "".join(parts)
+
+
+#: Сборщик промпта по имени формата (llm.prompt_format).
+#:
+#: Разделители ролей у моделей разные, а промпт мы собираем сами, мимо чат-слоя
+#: llama.cpp. С чужим форматом модель не падает, а начинает дописывать диалог за
+#: всех участников — persona.clean_reply() это ловит, но ответ уже испорчен.
+_RENDERERS = {"gigachat": _render_gigachat, "vikhr": _render_vikhr}
+
+#: Чем модель заканчивает ход. Он же первый стоп-маркер генерации: модели
+#: случается напечатать свой EOS текстом, а не выдать его токеном.
+_TURN_ENDS = {"gigachat": MESSAGE_SEP, "vikhr": TURN_END}
+
+
+def render_prompt(messages: list[dict[str, str]], fmt: str = "gigachat") -> str:
+    """Собрать промпт под формат модели (см. :data:`_RENDERERS`)."""
+    renderer = _RENDERERS.get(fmt)
+    if renderer is None:
+        raise LlmError(
+            f"неизвестный формат промпта {fmt!r} (есть: {', '.join(sorted(_RENDERERS))})"
+        )
+    return renderer(messages)
 
 
 #: Стоп-строки «конец первого предложения» — для complete(one_sentence=True).
@@ -120,6 +169,14 @@ def _server_error(response: httpx.Response) -> str:
 class LlmClient:
     def __init__(self, cfg) -> None:  # noqa: ANN001 — bashmak.config.Section
         self.base_url = str(cfg.get("server_url", "http://127.0.0.1:8080")).rstrip("/")
+        # Проверяем здесь, а не при сборке промпта: опечатка в prompt_format
+        # иначе всплыла бы только на первой реплике, уже в голосовом канале.
+        self.prompt_format = str(cfg.get("prompt_format", "gigachat"))
+        if self.prompt_format not in _RENDERERS:
+            raise LlmError(
+                f"llm.prompt_format={self.prompt_format!r} в конфиге — "
+                f"такого формата нет (есть: {', '.join(sorted(_RENDERERS))})"
+            )
         self.max_tokens = int(cfg.get("max_tokens", 48))
         self.temperature = float(cfg.get("temperature", 0.7))
         self.top_p = float(cfg.get("top_p", 0.9))
@@ -204,9 +261,9 @@ class LlmClient:
         поля не знает, просто его игнорирует.
         """
         self._check_roles(messages)
-        prompt = render_prompt(messages)
+        prompt = render_prompt(messages, self.prompt_format)
         # Конец реплики — он же EOS, но модель иногда печатает его текстом.
-        stop = [MESSAGE_SEP, *(_SENTENCE_STOPS if one_sentence else ())]
+        stop = [_TURN_ENDS[self.prompt_format], *(_SENTENCE_STOPS if one_sentence else ())]
         payload: dict[str, Any] = {
             "prompt": prompt,
             "n_predict": max_tokens if max_tokens is not None else self.max_tokens,
