@@ -499,6 +499,7 @@ def build_bot(cfg: Config) -> BashmakBot:
                 lines.append(f"музыка: {track.title}{suffix}")
             if session.player.queued:
                 lines.append(f"в очереди треков: {len(session.player.queued)}")
+            lines.append(f"радио: {'включено' if session.player.radio_on else 'выключено'}")
         lines.append("")
         lines.extend(stage_summary())
         await interaction.response.send_message(

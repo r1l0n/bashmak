@@ -193,10 +193,51 @@ def test_stop_wins_over_play():
         ("включи нам что-нибудь из кино", "из кино"),
         ("поставь песню группы алиса", "группы алиса"),
         ("врубни фоном джаз", "джаз"),
+        # «Любой» и «на свой вкус» — тоже шум: без этого бот ушёл бы искать на
+        # YouTube слово «любой».
+        ("включи любой трек", ""),
+        ("поставь что-нибудь на свой вкус", ""),
+        ("врубни какую-нибудь музыку", ""),
     ],
 )
 def test_extract_query_drops_filler(text, expected):
     assert extract_query(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "включи что-нибудь",
+        "включи музыку",
+        "поставь любую песню",
+        "врубни что-нибудь на свой вкус",
+        "поставь что-то",
+        "включи какой-нибудь трек",
+        "врубни рандомный трек",
+        "включи чего-нибудь",
+        "поставь музыку сам выбери",
+    ],
+)
+def test_play_without_a_name_is_a_command_to_choose(text):
+    """Пустой запрос — это «выбери сам», а не «команду не поняли»."""
+    decision = classify_by_rules(text)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is Intent.MUSIC_PLAY
+    assert decision.query == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # «Что-нибудь» само по себе музыку не заказывает.
+        "расскажи что-нибудь",
+        "скажи что-нибудь смешное",
+        "что-нибудь новенькое есть",
+        "любой каприз за ваши деньги",
+    ],
+)
+def test_choose_yourself_does_not_eat_chat(text):
+    assert classify_by_rules(text) is None
 
 
 def test_play_carries_query():
