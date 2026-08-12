@@ -33,6 +33,20 @@ from .persona import build_messages, clean_reply
 log = logging.getLogger(__name__)
 
 
+def _repeats(history: deque[dict[str, str]], reply: str) -> bool:
+    """Говорил ли бот это же в последних ходах канала.
+
+    Сравнение по всей истории, а не только с прошлым ответом: зацикливается
+    модель и через ход («А», «Б», «А»). Регистр и знаки в конце не считаются —
+    повтор от повтора отличается ровно ими.
+    """
+    same = reply.casefold().strip(" .!?…")
+    return any(
+        message["role"] == "assistant" and message["content"].casefold().strip(" .!?…") == same
+        for message in history
+    )
+
+
 @dataclass(order=True)
 class ChatTask:
     """Заявка на ответ. Сравнивается только по ended_at — это и есть FIFO."""
@@ -208,13 +222,23 @@ class LlmQueue:
 
         turn_note(reply=reply)
 
-        # Обе реплики разом и только после удачного ответа: пустой или
-        # оборванный ход сломал бы чередование user/assistant, которое
-        # проверяет LlmClient._check_roles. В историю кладём то, что реально
-        # прозвучит, — то есть уже обрезанный ответ.
-        history.append({"role": "user", "content": task.text})
-        history.append({"role": "assistant", "content": reply})
-        self._history_at[task.channel_id] = time.monotonic()
+        if _repeats(history, reply):
+            # Модель зациклилась на собственном ответе. Само оно не проходит:
+            # повтор лежит в истории и на следующем ходу подсказывает себя же,
+            # так что каждый следующий ответ только вероятнее. Раньше это
+            # разруливалось вручную — «Башмак, заткнись» чистит контекст через
+            # drop(); здесь то же самое, но само и на первом же повторе.
+            log.info("модель повторяется — сбрасываю контекст канала %s", task.channel_id)
+            history.clear()
+            self._history_at.pop(task.channel_id, None)
+        else:
+            # Обе реплики разом и только после удачного ответа: пустой или
+            # оборванный ход сломал бы чередование user/assistant, которое
+            # проверяет LlmClient._check_roles. В историю кладём то, что реально
+            # прозвучит, — то есть уже обрезанный ответ.
+            history.append({"role": "user", "content": task.text})
+            history.append({"role": "assistant", "content": reply})
+            self._history_at[task.channel_id] = time.monotonic()
 
         # Озвучка идёт отдельным таском: ждать её здесь значило бы держать
         # очередь простаивающей всё время проигрывания (ответ на 15 секунд —

@@ -137,3 +137,25 @@ def test_foreign_markup_is_stripped(raw, want):
 def test_normal_reply_survives_untouched(reply):
     """Обрезка не должна кусать обычную речь — в том числе с двоеточием."""
     assert clean_reply(reply) == reply
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Ровно то, что приезжало в лог вместо ответа.
+        '{"relevant_id": "684483043"}',
+        '{"relevant_info": []}',
+        '  {"relevant_info": []}  ',
+        "[]",
+        # Тот же мусор после неотрисовавшегося разделителя ролей.
+        ': {"relevant_id": "1"}',
+    ],
+)
+def test_service_json_is_not_a_reply(raw):
+    """Синтезатор не должен читать фигурные скобки, а история — их запоминать."""
+    assert clean_reply(raw) == ""
+
+
+def test_json_looking_speech_is_still_speech():
+    """Скобка внутри фразы — не повод её выбрасывать."""
+    assert clean_reply("Ты как {этот} из мема.") == "Ты как {этот} из мема."

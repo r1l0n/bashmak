@@ -156,6 +156,68 @@ def test_speaker_name_stays_out_of_history(loop):
     assert all("Вася" not in m["content"] for m in client.calls[1] if m["role"] != "system")
 
 
+def test_repeated_reply_resets_the_context(loop):
+    """Модель зациклилась — контекст чистится сам, без «Башмак, заткнись».
+
+    Повтор, оставленный в истории, на следующем ходу подсказывает себя же, и
+    дальше бот повторяется уже независимо от вопроса.
+    """
+    queue, client, spoken = build(["Иди нахер.", "Иди нахер!", "Свежий ответ."])
+
+    async def scenario():
+        await ask(queue, "первый")
+        await ask(queue, "второй")
+        await ask(queue, "третий")
+
+    run(loop, queue, scenario)
+
+    # Прозвучало всё: сброс глушит не ответ, а его след в контексте.
+    assert spoken == ["Иди нахер.", "Иди нахер!", "Свежий ответ."]
+    # Третий запрос ушёл с чистого листа — повтор в историю не попал.
+    assert roles(client.calls[2]) == ["system", "user"]
+
+
+def test_repeat_reset_ignores_case_and_punctuation(loop):
+    """«Иди нахер» и «иди нахер!» — один и тот же ответ, а не два разных."""
+    queue, client, _ = build(["Иди нахер.", "иди нахер"])
+
+    async def scenario():
+        await ask(queue, "первый")
+        await ask(queue, "второй")
+        await ask(queue, "третий")
+
+    run(loop, queue, scenario)
+
+    assert roles(client.calls[2]) == ["system", "user"]
+
+
+def test_different_replies_keep_the_history(loop):
+    """Сброс не должен срабатывать на обычном разговоре."""
+    queue, client, _ = build(["Первый ответ.", "Второй ответ."])
+
+    async def scenario():
+        await ask(queue, "первый")
+        await ask(queue, "второй")
+
+    run(loop, queue, scenario)
+
+    assert roles(client.calls[1]) == ["system", "user", "assistant", "user"]
+
+
+def test_service_json_never_reaches_the_channel(loop):
+    """JSON вместо реплики не озвучивается и не заражает следующий ход."""
+    queue, client, spoken = build(['{"relevant_id": "684483043"}', "Нормальный ответ."])
+
+    async def scenario():
+        await ask(queue, "расскажи что-нибудь новое")
+        await ask(queue, "ну и ладно")
+
+    run(loop, queue, scenario)
+
+    assert spoken == ["Нормальный ответ."]
+    assert roles(client.calls[1]) == ["system", "user"]
+
+
 def test_history_keeps_only_the_last_turns(loop):
     queue, client, _ = build(history_turns=2)
 
