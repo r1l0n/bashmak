@@ -53,6 +53,7 @@ class MusicPlayer:
         # Откуда брать трек, когда название не назвали.
         self._sources = [str(s) for s in (self._cfg.get("random_sources") or [])]
         self._pool = int(self._cfg.get("random_pool", 20))
+        self._min_views = int(self._cfg.get("random_min_views", 0))
         self._autoplay = bool(self._cfg.get("autoplay", True))
         #: Страницы недавно игравших треков — исключаются из случайного выбора.
         self._recent: deque[str] = deque(maxlen=RECENT_LIMIT)
@@ -106,7 +107,7 @@ class MusicPlayer:
 
         try:
             track = await search_random(
-                self._sources, self._pool, self._search_timeout, self._recent
+                self._sources, self._pool, self._search_timeout, self._recent, self._min_views
             )
         except SearchError as exc:
             log.warning("случайный трек не выбрался: %s", exc)
@@ -223,7 +224,7 @@ class MusicPlayer:
         """
         try:
             track = await search_random(
-                self._sources, self._pool, self._search_timeout, self._recent
+                self._sources, self._pool, self._search_timeout, self._recent, self._min_views
             )
         except SearchError as exc:
             # Не долбимся в цикле: следующая команда play взведёт радио заново.

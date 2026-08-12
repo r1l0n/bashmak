@@ -55,6 +55,7 @@ class FakeConfig:
             "search_timeout_s": 1,
             "random_sources": ["рок"],
             "random_pool": 5,
+            "random_min_views": 1_000_000,
             "autoplay": True,
         }
         defaults.update(music)
@@ -109,8 +110,15 @@ def stub_random(monkeypatch, tracks=None, error: Exception | None = None):
     calls: list[dict] = []
     queue = list(tracks or [])
 
-    async def fake_search_random(sources, pool, timeout, exclude=()):
-        calls.append({"sources": list(sources), "pool": pool, "exclude": set(exclude)})
+    async def fake_search_random(sources, pool, timeout, exclude=(), min_views=0):
+        calls.append(
+            {
+                "sources": list(sources),
+                "pool": pool,
+                "exclude": set(exclude),
+                "min_views": min_views,
+            }
+        )
         if error is not None:
             raise error
         return queue.pop(0) if queue else track()
@@ -128,6 +136,8 @@ def test_empty_query_picks_a_track_itself(loop, monkeypatch):
     assert answer == "Сам выбрал: Кино — Группа крови"
     assert player.current is not None
     assert calls[0]["sources"] == ["рок"]
+    # Порог популярности доезжает из конфига до поиска, а не теряется по пути.
+    assert calls[0]["min_views"] == 1_000_000
 
 
 def test_empty_query_without_sources_still_asks(loop, monkeypatch):

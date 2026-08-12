@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Container, Iterable, Sequence
@@ -49,9 +50,28 @@ _FLAT_OPTIONS = {**_YDL_OPTIONS, "extract_flat": "in_playlist"}
 #: строк — часовые сборники и «10 hours»; радио на таком встаёт до вечера.
 _MAX_RANDOM_DURATION = 900
 
-#: Сколько источников перебрать, прежде чем сдаться. Выдача бывает пустой
-#: (опечатка в конфиге) или целиком отсеянной фильтрами выше.
-_SOURCE_TRIES = 3
+#: Пол длительности: короче — это Shorts и обрезки, а не трек.
+_MIN_RANDOM_DURATION = 70
+
+#: Чего в выдаче быть не должно, как бы популярно оно ни было. Проверяется по
+#: названию и по каналу.
+#:
+#: Три кучи, все три лезут в поиск по жанрам сами:
+#:
+#: * бразильский фонк — по запросу «phonk» его больше, чем всего остального;
+#: * ИИ-генерация — у неё свои опознавательные знаки в названии и канале;
+#: * переливки чужих треков (nightcore, slowed, bass boosted) — это не музыка,
+#:   а обработка, и на волне подряд она звучит одинаково.
+#:
+#: Слова подобраны узко, по устойчивым связкам: голое «ai» ловило бы японские
+#: названия, голое «funk» — обычный фанк, который тут никому не мешал.
+_BLOCKED = re.compile(
+    r"brazil|brasil|бразил|baile|mandel[ãa]o|automotivo|montagem|\bmtg\b"
+    r"|funk\s*(?:brasil|br\b)|\bai\s*(?:music|song|cover|generated|remix)"
+    r"|generated\s+by\s+ai|\bsuno\b|\budio\b|нейросет|нейронк"
+    r"|nightcore|bass\s*boost|slowed|sped\s*up|8d\s*audio",
+    re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -114,33 +134,63 @@ def _entry_url(entry: dict[str, Any]) -> str:
     return f"https://www.youtube.com/watch?v={video_id}" if video_id else ""
 
 
-def _choose_url(entries: Iterable[dict[str, Any]], exclude: Container[str] = ()) -> str:
+def _choose_url(
+    entries: Iterable[dict[str, Any]],
+    exclude: Container[str] = (),
+    min_views: int = 0,
+) -> str:
     """Случайная годная ссылка из выдачи. Пустая строка — годных не осталось.
 
-    Отсеиваются прямые эфиры (у них нет конца, и радио на них зависает),
-    многочасовые сборники и то, что недавно уже играло.
+    Отсеиваются прямые эфиры (у них нет конца, и волна на них зависает),
+    многочасовые сборники, Shorts, мусор из :data:`_BLOCKED` и то, что недавно
+    уже играло.
+
+    ``min_views`` — главный фильтр качества. Ноунеймы и ИИ-генерация отличаются
+    от нормальной музыки не словами в названии, а порядком просмотров:
+    у настоящего популярного трека их миллионы, у сгенерированного — сотни.
     """
-    pool: list[str] = []
+    good: list[str] = []
+    # Записи без счётчика просмотров — второй эшелон, а не мусор: поле в плоской
+    # выдаче необязательное, и жёсткий отказ выключил бы волну целиком, стоит
+    # YouTube перестать его отдавать.
+    unknown: list[str] = []
+
     for entry in entries:
         if not entry or entry.get("is_live") or entry.get("live_status") == "is_live":
             continue
         duration = entry.get("duration")
-        if duration is not None and duration > _MAX_RANDOM_DURATION:
+        if duration is not None and not (_MIN_RANDOM_DURATION <= duration <= _MAX_RANDOM_DURATION):
+            continue
+        if _BLOCKED.search(f"{entry.get('title') or ''} {entry.get('channel') or entry.get('uploader') or ''}"):
             continue
         url = _entry_url(entry)
-        if url and url not in exclude:
-            pool.append(url)
+        if not url or url in exclude:
+            continue
+
+        views = entry.get("view_count")
+        if not min_views or (views is not None and views >= min_views):
+            good.append(url)
+        elif views is None:
+            unknown.append(url)
+
+    pool = good or unknown
     return random.choice(pool) if pool else ""
 
 
-def _extract_random(sources: list[str], pool: int, exclude: Container[str]) -> Track:
-    """Блокирующая часть случайного выбора: перечень выдачи, затем один резолв."""
-    tried = random.sample(sources, k=min(len(sources), _SOURCE_TRIES))
+def _extract_random(
+    sources: list[str], pool: int, exclude: Container[str], min_views: int
+) -> Track:
+    """Блокирующая часть случайного выбора: перечень выдачи, затем один резолв.
+
+    Источники перебираются в случайном порядке до первого удачного: после
+    фильтров выдача пустеет заметно чаще, чем раньше, и одной попытки мало.
+    """
+    tried = random.sample(sources, k=len(sources))
     for source in tried:
         with yt_dlp.YoutubeDL(_FLAT_OPTIONS) as ydl:
             info = ydl.extract_info(_source_query(source, pool), download=False)
 
-        url = _choose_url((info or {}).get("entries") or [], exclude)
+        url = _choose_url((info or {}).get("entries") or [], exclude, min_views)
         if url:
             log.debug("случайный трек взят из источника %r", source)
             return _extract(url)
@@ -185,12 +235,13 @@ async def search_random(
     pool: int = 20,
     timeout: float = 20.0,
     exclude: Container[str] = (),
+    min_views: int = 0,
 ) -> Track:
     """Выбрать трек за человека: случайный источник, случайный трек из выдачи.
 
     ``sources`` — строки-запросы и ссылки на плейлисты (music.random_sources).
-    ``exclude`` — страницы недавно игравших треков, чтобы радио не крутило одно
-    и то же.
+    ``exclude`` — страницы недавно игравших треков, чтобы волна не крутила одно
+    и то же. ``min_views`` — порог популярности (music.random_min_views).
 
     Оба похода в сеть (перечень и резолв выбранного) идут одним заданием в
     тредпуле, поэтому таймаут здесь общий на них — как и у :func:`search`.
@@ -202,7 +253,7 @@ async def search_random(
     try:
         track = await asyncio.wait_for(
             loop.run_in_executor(
-                _executor(), _extract_random, list(sources), pool, frozenset(exclude)
+                _executor(), _extract_random, list(sources), pool, frozenset(exclude), min_views
             ),
             timeout,
         )
