@@ -77,8 +77,24 @@ def loop():
 def no_ffmpeg(monkeypatch):
     """_start() иначе полезет поднимать настоящий процесс ffmpeg."""
     monkeypatch.setattr(
-        player_module.discord, "FFmpegPCMAudio", lambda *args, **kwargs: object()
+        player_module.discord, "FFmpegPCMAudio", lambda *args, **kwargs: _FakeFFmpeg([])
     )
+
+
+class _FakeFFmpeg:
+    """ffmpeg в объёме, который трогает _TrackSource."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    def read(self):
+        return self._chunks.pop(0) if self._chunks else b""
+
+    def is_opus(self):
+        return False
+
+    def cleanup(self):
+        pass
 
 
 def build(**music):
@@ -138,6 +154,93 @@ def test_empty_query_picks_a_track_itself(loop, monkeypatch):
     assert calls[0]["sources"] == ["рок"]
     # Порог популярности доезжает из конфига до поиска, а не теряется по пути.
     assert calls[0]["min_views"] == 1_000_000
+
+
+def test_dead_ffmpeg_is_logged_as_failure_not_as_finished(loop, monkeypatch, caplog):
+    """ffmpeg, не отдавший ни байта, — это провал, а не доигравший трек.
+
+    Микшеру оба случая видны одинаково (пустой read()), и без различия в логе
+    «сказал включаю и молчит» выглядит как нормально закончившийся трек.
+    """
+    player, _ = build(autoplay=False)
+
+    async def fake_search(query, timeout):
+        return track("Casino")
+
+    monkeypatch.setattr(player_module, "search", fake_search)
+    loop.run_until_complete(player.play("casino"))
+
+    with caplog.at_level("INFO", logger=player_module.log.name):
+        in_loop(loop, player._on_track_end, player._source)
+
+    assert "не проиграл ни байта" in caplog.text
+    assert "трек закончился" not in caplog.text
+
+
+def test_played_track_is_logged_as_finished(loop, monkeypatch, caplog):
+    player, _ = build(autoplay=False)
+
+    async def fake_search(query, timeout):
+        return track("Casino")
+
+    monkeypatch.setattr(player_module, "search", fake_search)
+    monkeypatch.setattr(
+        player_module.discord,
+        "FFmpegPCMAudio",
+        lambda *args, **kwargs: _FakeFFmpeg([b"x" * 3840]),
+    )
+    loop.run_until_complete(player.play("casino"))
+
+    # Микшер успел прочитать кадр — трек играл по-настоящему.
+    source = player._source
+    source.read()
+
+    with caplog.at_level("INFO", logger=player_module.log.name):
+        in_loop(loop, player._on_track_end, source)
+
+    assert "трек закончился" in caplog.text
+    assert "не проиграл ни байта" not in caplog.text
+
+
+def test_source_counts_what_ffmpeg_gave(monkeypatch):
+    errors = player_module._FFmpegLog("Casino")
+    source = player_module._TrackSource(_FakeFFmpeg([b"ab", b"cde", b""]), errors)
+
+    assert source.played_nothing
+    source.read()
+    source.read()
+    assert source.bytes_read == 5
+    assert not source.played_nothing
+
+
+def test_failure_reports_what_ffmpeg_said():
+    """Причина провала берётся из stderr ffmpeg, а не выдумывается."""
+    errors = player_module._FFmpegLog("Casino")
+    errors.write(b"[https] HTTP error 403 Forbidden\n")
+
+    source = player_module._TrackSource(_FakeFFmpeg([b""]), errors)
+    source.read()
+
+    assert source.played_nothing
+    assert "403 Forbidden" in source.failure
+
+
+def test_ffmpeg_log_glues_lines_split_across_writes():
+    """stderr приезжает кусками по BLOCKSIZE, а не по строкам."""
+    errors = player_module._FFmpegLog("Casino")
+    errors.write(b"HTTP error 40")
+    errors.write(b"3 Forbidden\nServer returned 403\n")
+
+    assert errors.tail == ["HTTP error 403 Forbidden", "Server returned 403"]
+
+
+def test_ffmpeg_log_keeps_only_the_last_lines():
+    errors = player_module._FFmpegLog("Casino")
+    for i in range(player_module._STDERR_KEEP + 3):
+        errors.write(f"строка {i}\n".encode())
+
+    assert len(errors.tail) == player_module._STDERR_KEEP
+    assert errors.tail[-1] == f"строка {player_module._STDERR_KEEP + 2}"
 
 
 def test_empty_query_without_sources_still_asks(loop, monkeypatch):

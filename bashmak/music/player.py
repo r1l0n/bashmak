@@ -31,6 +31,79 @@ _FFMPEG_OPTIONS = "-vn"
 
 VOLUME_STEP = 0.15
 
+#: Сколько последних строк stderr ffmpeg держать, чтобы было чем объяснить провал.
+_STDERR_KEEP = 5
+
+
+class _FFmpegLog:
+    """Приёмник stderr ffmpeg: discord.py пишет сюда из своего потока.
+
+    Объект нарочно без ``fileno()`` — по нему discord.py и решает, отдать
+    stderr процессу-родителю или качать его себе (см. FFmpegAudio). Родителю
+    здесь нельзя: это journal, а не лог бота, и «403 Forbidden» на потоке
+    YouTube остаётся в логе неотличим от обычного конца трека.
+    """
+
+    def __init__(self, title: str) -> None:
+        self._title = title
+        self._buf = b""
+        #: Последние строки — ими объясняется провал, когда трек не зазвучал.
+        self.tail: list[str] = []
+
+    def write(self, data: bytes) -> int:
+        # Пишет чужой поток, и упасть тут нельзя: на исключении discord.py
+        # закрывает stderr и больше ничего не приносит.
+        try:
+            *lines, self._buf = (self._buf + data).split(b"\n")
+            for raw in lines:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line:
+                    continue
+                self.tail.append(line)
+                del self.tail[:-_STDERR_KEEP]
+                log.warning("ffmpeg [%s]: %s", self._title, line)
+        except Exception:
+            log.exception("не смог разобрать stderr ffmpeg")
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+
+class _TrackSource(discord.AudioSource):
+    """FFmpegPCMAudio со счётчиком отданного звука.
+
+    Микшеру конец трека и мгновенно умерший ffmpeg видны одинаково — пустым
+    ``read()`` (см. output/arbiter.py). Счётчик позволяет отличить одно от
+    другого: ноль отданных байт означает, что играть даже не начинали.
+    """
+
+    def __init__(self, inner: discord.AudioSource, errors: _FFmpegLog) -> None:
+        self._inner = inner
+        self._errors = errors
+        self.bytes_read = 0
+
+    def read(self) -> bytes:
+        data = self._inner.read()
+        self.bytes_read += len(data)
+        return data
+
+    def is_opus(self) -> bool:
+        return self._inner.is_opus()
+
+    def cleanup(self) -> None:
+        self._inner.cleanup()
+
+    @property
+    def played_nothing(self) -> bool:
+        return self.bytes_read == 0
+
+    @property
+    def failure(self) -> str:
+        """Чем ffmpeg объяснил провал. Пусто — не объяснил ничем."""
+        return " | ".join(self._errors.tail)
+
+
 #: Сколько последних треков помнить, чтобы случайный выбор их не повторял.
 #: Больше запаса не нужно: источников в конфиге единицы, и слишком длинная
 #: память просто выест из них все годные варианты.
@@ -247,11 +320,16 @@ class MusicPlayer:
         self._arbiter.source.set_music(None)
 
     def _start(self, track: Track) -> None:
-        source = discord.FFmpegPCMAudio(
+        # stderr ffmpeg перехватывается, а не уходит родительскому процессу:
+        # иначе единственное объяснение молчания оседает в journal.
+        errors = _FFmpegLog(track.title)
+        inner = discord.FFmpegPCMAudio(
             track.stream_url,
             before_options=_FFMPEG_BEFORE,
             options=_FFMPEG_OPTIONS,
+            stderr=errors,
         )
+        source = _TrackSource(inner, errors)
         self._current = track
         self._source = source
         self._arbiter.source.set_music(source)
@@ -277,7 +355,17 @@ class MusicPlayer:
         finished = self._current.title if self._current else "?"
         self._current = None
         self._source = None
-        log.info("трек закончился: %s", finished)
+        if isinstance(source, _TrackSource) and source.played_nothing:
+            # Не «закончился»: ffmpeg не отдал ни одного кадра. Обычно это
+            # закрытая ссылка на поток (403 от YouTube в ответ ffmpeg, хотя
+            # yt-dlp ссылку выдал) или недоступная из-под бота сеть.
+            log.error(
+                "трек не проиграл ни байта: %s — %s",
+                finished,
+                source.failure or "ffmpeg ничего не сказал",
+            )
+        else:
+            log.info("трек закончился: %s", finished)
         try:
             if not self._advance():
                 self._schedule_radio()
