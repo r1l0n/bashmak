@@ -13,6 +13,7 @@ import asyncio
 import logging
 import random
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Container, Iterable, Sequence
@@ -52,6 +53,13 @@ _MAX_RANDOM_DURATION = 900
 
 #: Пол длительности: короче — это Shorts и обрезки, а не трек.
 _MIN_RANDOM_DURATION = 70
+
+#: Сколько секунд бюджета держать про запас на резолв выбранного ролика.
+#:
+#: Перебор источников останавливается за этот срок до конца таймаута: иначе
+#: последний перечень успевал бы, а резолв — уже нет, и вызов возвращал бы
+#: «не нашёл», имея на руках готовую ссылку.
+_RESOLVE_RESERVE = 6.0
 
 #: Чего в выдаче быть не должно, как бы популярно оно ни было. Проверяется по
 #: названию и по каналу.
@@ -178,15 +186,30 @@ def _choose_url(
 
 
 def _extract_random(
-    sources: list[str], pool: int, exclude: Container[str], min_views: int
+    sources: list[str], pool: int, exclude: Container[str], min_views: int, deadline: float
 ) -> Track:
     """Блокирующая часть случайного выбора: перечень выдачи, затем один резолв.
 
     Источники перебираются в случайном порядке до первого удачного: после
     фильтров выдача пустеет заметно чаще, чем раньше, и одной попытки мало.
+
+    ``deadline`` (``time.monotonic``) — до каких пор вообще есть смысл искать.
+    Перебор ограничен временем, а не числом попыток: ``asyncio.wait_for`` в
+    :func:`search_random` снимает ожидание, но не этот поток, и без бюджета он
+    продолжал бы ходить по оставшимся источникам, когда вызвавшего уже нет.
+    Пул на два потока, и пара таких переживших свой таймаут заданий занимает его
+    целиком — тогда встаёт и обычный поиск по названию.
     """
     tried = random.sample(sources, k=len(sources))
+    used = 0
     for source in tried:
+        # Первый источник пробуем всегда: без него вызов заведомо пустой. Дальше
+        # — пока в бюджете остаётся время ещё и на резолв найденного.
+        if used and time.monotonic() + _RESOLVE_RESERVE >= deadline:
+            log.debug("случайный трек: время вышло, перебрано источников %d из %d", used, len(tried))
+            break
+        used += 1
+
         with yt_dlp.YoutubeDL(_FLAT_OPTIONS) as ydl:
             info = ydl.extract_info(_source_query(source, pool), download=False)
 
@@ -196,7 +219,7 @@ def _extract_random(
             return _extract(url)
         log.debug("источник %r не дал ничего годного", source)
 
-    raise SearchError(f"ни один из источников не дал трека: {tried}")
+    raise SearchError(f"ни один из источников не дал трека: {tried[:used]}")
 
 
 def _executor() -> ThreadPoolExecutor:
@@ -250,10 +273,20 @@ async def search_random(
         raise SearchError("список источников пуст (music.random_sources)")
 
     loop = asyncio.get_running_loop()
+    # Отсчёт идёт от постановки в очередь, а не от старта задания: ожидание
+    # свободного слота тратит тот же таймаут, и задание, дождавшееся его слишком
+    # поздно, лезть в сеть уже не должно.
+    deadline = time.monotonic() + timeout
     try:
         track = await asyncio.wait_for(
             loop.run_in_executor(
-                _executor(), _extract_random, list(sources), pool, frozenset(exclude), min_views
+                _executor(),
+                _extract_random,
+                list(sources),
+                pool,
+                frozenset(exclude),
+                min_views,
+                deadline,
             ),
             timeout,
         )

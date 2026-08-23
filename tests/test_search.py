@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
-from bashmak.music.search import _choose_url, _source_query
+from bashmak.music import search as search_module
+from bashmak.music.search import SearchError, _choose_url, _extract_random, _source_query
 
 
 def entry(**overrides):
@@ -142,3 +145,65 @@ def test_choose_url_falls_back_when_views_are_unknown():
 
 def test_choose_url_ignores_views_when_threshold_is_zero():
     assert _choose_url([entry(url="https://x/any", view_count=3)], min_views=0) == "https://x/any"
+
+
+@pytest.fixture
+def listings(monkeypatch):
+    """Подменяет yt-dlp: выдача всегда пустая, зато видно, куда поход был."""
+    seen: list[str] = []
+
+    class FakeYDL:
+        def __init__(self, options):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def extract_info(self, query, download=False):
+            seen.append(query)
+            # Ничего годного — перебор пойдёт к следующему источнику.
+            return {"entries": []}
+
+    monkeypatch.setattr(search_module.yt_dlp, "YoutubeDL", FakeYDL)
+    return seen
+
+
+def test_extract_random_tries_every_source_while_there_is_time(listings):
+    sources = [f"источник {i}" for i in range(5)]
+
+    with pytest.raises(SearchError):
+        _extract_random(sources, 20, (), 0, time.monotonic() + 300)
+
+    assert len(listings) == len(sources)
+    assert set(listings) == {f"ytsearch20:{s}" for s in sources}
+
+
+def test_extract_random_stops_when_the_budget_is_spent(listings):
+    """Перебор ограничен временем: поток не должен пережить свой таймаут.
+
+    ``wait_for`` снимает ожидание, но не поток, а в пуле их всего два: задание,
+    которое ходит по источникам после отказа вызвавшего, занимает слот у
+    обычного поиска по названию.
+    """
+    sources = [f"источник {i}" for i in range(10)]
+
+    with pytest.raises(SearchError):
+        # Бюджет исчерпан ещё до входа — так выглядит задание, дождавшееся
+        # свободного слота дольше собственного таймаута.
+        _extract_random(sources, 20, (), 0, time.monotonic())
+
+    # Первый источник пробуется всегда, дальше поход в сеть уже бессмыслен.
+    assert len(listings) == 1
+
+
+def test_extract_random_keeps_reserve_for_the_resolve(listings):
+    """К концу бюджета перебор встаёт, даже если формально время ещё есть."""
+    sources = [f"источник {i}" for i in range(10)]
+
+    with pytest.raises(SearchError):
+        _extract_random(sources, 20, (), 0, time.monotonic() + search_module._RESOLVE_RESERVE / 2)
+
+    assert len(listings) == 1
