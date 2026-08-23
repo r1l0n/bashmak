@@ -156,40 +156,24 @@ def test_vikhr_client_stops_at_its_own_turn_end():
     """Стоп-маркер идёт за форматом: <|message_sep|> для Vikhr ничего не значит."""
     client, sent = _capture(prompt_format="vikhr")
 
-    _ask(client, build_messages("Вася", "как дела"), one_sentence=True)
+    _ask(client, build_messages("Вася", "как дела"))
 
     assert TURN_END in sent["stop"]
     assert MESSAGE_SEP not in sent["stop"]
     assert sent["prompt"].startswith("system\n")
 
 
-# ------------------------------------------ обрыв на конце предложения ----
-#
-# Генерацию сверх первого предложения всё равно выбрасывает clean_reply, но
-# считает её модель, и на CPU это секунды. Обрываем на сервере — а знак
-# препинания, который сервер при этом съедает, возвращаем обратно.
-
-
 @pytest.mark.parametrize(
-    ("content", "stopping_word", "want"),
+    ("data", "want"),
     [
-        # Сервер оборвал на «! » и сам знак в content не положил.
-        ("Иди нахер", "! ", "Иди нахер!"),
-        # Другие сборки отдают знак уже без пробела.
-        ("Не знаю", ".", "Не знаю."),
-        ("Не знаю", "… ", "Не знаю…"),
-        # Сборка без stopping_word: остаёмся без знака, но не падаем.
-        ("Норм", None, "Норм"),
-        # Оборвано концом реплики, а не предложения — дописывать нечего.
-        ("Норм.", MESSAGE_SEP, "Норм."),
-        # Пустой ответ знаком препинания не становится.
-        ("", "! ", ""),
+        ({"content": "Иди нахер! И дверь закрой."}, "Иди нахер! И дверь закрой."),
+        ({"content": "  Норм.  "}, "Норм."),
+        ({"content": ""}, ""),
+        ({"content": None}, ""),
     ],
 )
-def test_sentence_mark_is_restored(content, stopping_word, want):
-    data = {"content": content}
-    if stopping_word is not None:
-        data["stopping_word"] = stopping_word
+def test_answer_is_taken_as_is(data, want):
+    """Ответ отдаётся целиком: знаки препинания в стопах не участвуют."""
     assert _answer(data) == want
 
 
@@ -228,13 +212,14 @@ class FakeSection:
         return self._values.get(name, default)
 
 
-def test_chat_request_stops_at_the_first_sentence():
+def test_chat_request_is_not_cut_at_the_first_sentence():
+    """Длину держит промпт, а не стоп-строки: обрывать фразу клиент не лезет."""
     client, sent = _capture()
 
-    _ask(client, build_messages("Вася", "как дела"), one_sentence=True)
+    _ask(client, build_messages("Вася", "как дела"))
 
     assert MESSAGE_SEP in sent["stop"]
-    assert {". ", "! ", "? ", "… "} <= set(sent["stop"])
+    assert not {". ", "! ", "? ", "… "} & set(sent["stop"])
 
 
 def test_other_requests_keep_the_full_output():

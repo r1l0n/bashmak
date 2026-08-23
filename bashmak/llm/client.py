@@ -108,42 +108,18 @@ def render_prompt(messages: list[dict[str, str]], fmt: str = "gigachat") -> str:
     return renderer(messages)
 
 
-#: Стоп-строки «конец первого предложения» — для complete(one_sentence=True).
-#:
-#: Персона отвечает одним предложением, и всё, что модель допишет после него,
-#: persona.clean_reply() всё равно выбросит. Но посчитано оно к этому моменту
-#: уже будет: на CPU это лишние секунды в каждой реплике, поэтому генерацию
-#: обрываем на сервере, а не после.
-#:
-#: Знак с пробелом, а не голый: «.» сработал бы внутри «3.5» и «т.д.», а «. » —
-#: только там, где за предложением правда идёт продолжение. Последнее
-#: предложение заканчивается на EOS и под правило не подпадает.
-_SENTENCE_STOPS = (". ", "! ", "? ", "… ")
-
-#: Чем сервер мог оборвать предложение — по этому знаку его и восстанавливаем.
-_SENTENCE_MARKS = frozenset(".!?…")
-
 #: Сколько символов пояснения от сервера писать в лог. Ошибка шаблона чата
 #: бывает длинной (minja печатает кусок шаблона), но информативно её начало.
 _DETAIL_CHARS = 600
 
 
 def _answer(data: dict[str, Any]) -> str:
-    """Текст ответа с возвращённым знаком конца предложения.
+    """Текст ответа как есть.
 
-    Сработавшую стоп-строку сервер в ``content`` не включает: от «Иди нахер! И
-    дверь закрой.» пришло бы «Иди нахер» без знака, и Silero прочитал бы фразу
-    с оборванной интонацией. Знак берём из ``stopping_word``.
-
-    Поле есть не во всех сборках llama.cpp, и приходить может как «! », так и
-    «!». Нет поля или знак незнакомый — остаёмся без знака: интонация того не
-    стоит, чтобы падать.
+    Единственная стоп-строка — конец хода (:data:`_TURN_ENDS`), знаков
+    препинания среди стопов нет, поэтому восстанавливать в конце нечего.
     """
-    text = (data["content"] or "").rstrip()
-    stopped_by = str(data.get("stopping_word") or "").strip()
-    if text and stopped_by in _SENTENCE_MARKS:
-        text += stopped_by
-    return text.strip()
+    return (data["content"] or "").strip()
 
 
 def _server_error(response: httpx.Response) -> str:
@@ -242,16 +218,13 @@ class LlmClient:
         max_tokens: int | None = None,
         temperature: float | None = None,
         json_schema: dict[str, Any] | None = None,
-        one_sentence: bool = False,
         slot: int | None = None,
         retries: int = 1,
     ) -> str:
         """Сходить в модель и вернуть текст ответа.
 
-        ``one_sentence`` — оборвать генерацию на конце первого предложения (см.
-        :data:`_SENTENCE_STOPS`). Включать только там, где длиннее одного
-        предложения ответ и не нужен: для JSON-классификатора это порезало бы
-        объект пополам на запросе вроде «Кино. Группа крови».
+        Длину ответа задаёт промпт и ``n_predict``, а не стоп-строки: обрывать
+        генерацию на конце первого предложения — забота модели, не клиента.
 
         ``slot`` — в каком слоте llama-server считать. У слота свой кеш
         префикса, а промпты у диалога и у классификатора намерений разные:
@@ -263,7 +236,7 @@ class LlmClient:
         self._check_roles(messages)
         prompt = render_prompt(messages, self.prompt_format)
         # Конец реплики — он же EOS, но модель иногда печатает его текстом.
-        stop = [_TURN_ENDS[self.prompt_format], *(_SENTENCE_STOPS if one_sentence else ())]
+        stop = [_TURN_ENDS[self.prompt_format]]
         payload: dict[str, Any] = {
             "prompt": prompt,
             "n_predict": max_tokens if max_tokens is not None else self.max_tokens,

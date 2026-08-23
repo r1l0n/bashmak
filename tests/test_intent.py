@@ -62,7 +62,6 @@ def test_ambiguous_words_are_chat_when_nothing_plays(text):
 @pytest.mark.parametrize(
     "text",
     [
-        "расскажи анекдот",
         "как дела",
         "что ты думаешь про питон",
         # «включи» без объекта — начало обычной фразы, а не команда плееру.
@@ -253,3 +252,39 @@ def test_play_without_query_is_still_a_music_command():
     assert decision is not None
     assert decision.intent is Intent.MUSIC_PLAY
     assert decision.query == ""
+
+
+# ---------------------------------------------------------- анекдоты ----
+@pytest.mark.parametrize(
+    "text",
+    [
+        "расскажи анекдот",
+        "анекдот",
+        "расскажи-ка анекдотик",
+        "давай анекдотов",
+        "зачитай анекдот",
+        # Глагол музыкальный, а существительное нет: на YouTube это уходить
+        # не должно.
+        "включи анекдот",
+        "пошути",
+    ],
+)
+def test_rules_catch_a_joke_request(text):
+    decision = classify_by_rules(text)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is Intent.JOKE
+    assert decision.query == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Обычная речь, а не просьба рассказать.
+        "он просто хотел пошутить",
+        "это была шутка",
+        "включи кино группа крови",
+    ],
+)
+def test_ordinary_speech_is_not_a_joke_request(text):
+    decision = classify_by_rules(text)
+    assert decision is None or decision.intent is not Intent.JOKE

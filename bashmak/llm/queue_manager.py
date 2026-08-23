@@ -195,9 +195,6 @@ class LlmQueue:
         with stage(log, "llm", queue=self._queue.qsize(), контекст=len(history)) as info:
             raw = await self._client.complete(
                 build_messages(task.speaker, task.text, history),
-                # Персона отвечает одним предложением: обрываем генерацию на
-                # его конце, а не досчитываем то, что clean_reply() выбросит.
-                one_sentence=True,
                 # Свой слот: классификатор намерений не должен вытирать кеш
                 # префикса диалога (см. CHAT_SLOT).
                 slot=CHAT_SLOT,
@@ -212,9 +209,8 @@ class LlmQueue:
 
         reply = clean_reply(raw)
         if reply != raw:
-            # Модель либо дописала диалог за собеседника (тогда в канал ушла бы
-            # выдуманная беседа целиком), либо не удержалась в одном
-            # предложении. Второе происходит регулярно и в лог не выносится.
+            # Модель дописала диалог за собеседника или налепила разметки — без
+            # чистки в канал ушла бы выдуманная беседа целиком.
             log.debug("ответ обрезан: %r", raw)
         if not reply:
             log.warning("LLM вернула пустой ответ на %r", task.text)

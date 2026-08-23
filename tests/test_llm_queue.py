@@ -270,9 +270,13 @@ def test_empty_reply_does_not_break_alternation(loop):
     assert roles(client.calls[1]) == ["system", "user"]
 
 
-def test_history_stores_the_trimmed_reply(loop):
-    """В контекст идёт то, что реально прозвучало, а не всё, что выдала модель."""
-    queue, client, spoken = build(replies=["Первое. Второе.", "Ага."])
+def test_history_stores_the_cleaned_reply(loop):
+    """В контекст идёт то, что реально прозвучало, а не всё, что выдала модель.
+
+    Чистится дописанный чужой ход: сколько предложений сказать, решает модель,
+    и оба своих сюда попадают целиком.
+    """
+    queue, client, spoken = build(replies=["Первое. Второе.assistant: и ещё", "Ага."])
 
     async def scenario():
         await ask(queue, "вопрос")
@@ -280,8 +284,8 @@ def test_history_stores_the_trimmed_reply(loop):
 
     run(loop, queue, scenario)
 
-    assert spoken == ["Первое.", "Ага."]
-    assert client.calls[1][2]["content"] == "Первое."
+    assert spoken == ["Первое. Второе.", "Ага."]
+    assert client.calls[1][2]["content"] == "Первое. Второе."
 
 
 # ------------------------------------------------------------------ drop --

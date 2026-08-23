@@ -28,6 +28,7 @@ from .audio import voice_recv_patch
 from .audio.listener import VoiceListener
 from .config import Config, load_config
 from .intent.router import Decision, Intent, IntentRouter
+from .jokes import JokeTeller
 from .llm.client import LlmClient
 from .llm.queue_manager import ChatTask, LlmQueue
 from .music import search as music_search
@@ -175,6 +176,12 @@ class GuildSession:
             turn_report()
             return
 
+        if decision.intent is Intent.JOKE:
+            # Мимо диалоговой очереди: анекдот берётся из ленты, а не
+            # сочиняется, и ждать за чужим инференсом ему незачем.
+            await self._handle_joke(decision)
+            return
+
         if decision.intent is Intent.CHAT:
             await self.bot.llm_queue.submit(
                 ChatTask(
@@ -194,6 +201,16 @@ class GuildSession:
         # Музыкальные команды идут мимо диалоговой очереди — они быстрые,
         # и ждать за чужим инференсом им незачем.
         await self._handle_music(decision, speaker)
+
+    async def _handle_joke(self, decision: Decision) -> None:
+        try:
+            answer = await self.bot.jokes.tell()
+        except Exception:
+            log.exception("анекдот не рассказался")
+            answer = "Анекдот сломался, посмотри логи."
+
+        turn_note(sent=f"команда {decision.intent.value}", reply=answer)
+        await self.say(answer)
 
     async def _handle_music(self, decision: Decision, speaker: str) -> None:
         try:
@@ -248,6 +265,9 @@ class BashmakBot(discord.Client):
         self.wakeword = WakeWordFilter(cfg.wakeword)
         self.router = IntentRouter(cfg, self.llm)
         self.llm_queue = LlmQueue(cfg.llm, self.llm, self._on_llm_reply)
+        # Один на весь бот: пачка из ленты и список рассказанного общие для
+        # всех каналов, иначе в соседнем звучал бы тот же анекдот.
+        self.jokes = JokeTeller(cfg, self.llm)
 
         self.sessions: dict[int, GuildSession] = {}
         self._idle_task: asyncio.Task | None = None
@@ -334,6 +354,7 @@ class BashmakBot(discord.Client):
         self.sessions.clear()
 
         await self.llm_queue.stop()
+        await self.jokes.close()
         await self.llm.close()
         self.stt.close()
         self.tts.close()
