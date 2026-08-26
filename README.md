@@ -18,7 +18,7 @@ bash scripts/setup.sh --systemd
 
 | Флаг | Назначение |
 |---|---|
-| `--profile balanced\|quality\|qwen\|vikhr` | Какие модели качать (по умолчанию `balanced`) |
+| `--profile balanced\|quality\|qwen\|vikhr` | Какие модели качать (по умолчанию `vikhr`) |
 | `--skip-models` | Только окружение, без весов |
 | `--models-only` | Только докачать веса в готовое окружение |
 | `--systemd` | Установить и включить юниты |
