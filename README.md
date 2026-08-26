@@ -319,6 +319,7 @@ sudo resolvectl revert tun-bashmak
 ## Архитектура
 
 ```
+![alt text](image/archi.png)
 Discord voice (по SSRC, раздельно на каждого)
    │
    ├─ sink.py ─ буфер ─ VAD ─┐
