@@ -288,3 +288,47 @@ def test_rules_catch_a_joke_request(text):
 def test_ordinary_speech_is_not_a_joke_request(text):
     decision = classify_by_rules(text)
     assert decision is None or decision.intent is not Intent.JOKE
+
+
+# ---------------------------------------------------------- сценарий ----
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Кодовая фраза как есть — и как её обычно приносит распознавание.
+        "дай новый сценарий",
+        "дай-ка новый сценарий",
+        "дай мне новый сценарий",
+        "дай, пожалуйста, новый сценарий",
+        "давай новый сценарий",
+        "новый сценарий",
+        "новые сценарии",
+        "дай еще один сценарий",
+        "подкинь сценарий",
+        # Глагол музыкальный, а существительное нет: на YouTube это уходить
+        # не должно.
+        "запусти новый сценарий",
+        "включи новый сценарий",
+    ],
+)
+@pytest.mark.parametrize("music_playing", [False, True])
+def test_rules_catch_the_code_phrase(text, music_playing):
+    decision = classify_by_rules(text, music_playing=music_playing)
+    assert decision is not None, f"правила не поймали {text!r}"
+    assert decision.intent is Intent.GAME
+    assert decision.query == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Слово «сценарий» само по себе команды не составляет.
+        "сценарий фильма был так себе",
+        "по сценарию он погибает",
+        "что нового",
+        "включи кино группа крови",
+        "расскажи анекдот",
+    ],
+)
+def test_ordinary_speech_is_not_the_code_phrase(text):
+    decision = classify_by_rules(text, music_playing=True)
+    assert decision is None or decision.intent is not Intent.GAME

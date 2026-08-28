@@ -140,9 +140,8 @@ async def _check_llm(client) -> str:  # noqa: ANN001 — LlmClient
 async def _check_voice_roundtrip(cfg) -> str:  # noqa: ANN001 — Config
     """TTS синтезирует фразу, VAD признаёт её речью, STT читает обратно.
 
-    VAD включён в проверку потому, что при поломке он не падает, а молчит.
-    Сломанный VAD выглядит как полностью рабочий бот, который никогда никого не
-    слышит; обнаружить это можно только прогнав через него заведомую речь.
+    VAD включён в проверку потому, что при поломке он не падает, а молчит:
+    снаружи это выглядит как рабочий бот, который никогда никого не слышит.
     """
     import numpy as np
     import soxr
@@ -256,9 +255,8 @@ def _check_socks() -> str:
 def _check_tunnel_egress() -> str:
     """Проверить, что через туннель реально ходит трафик.
 
-    Слушающий SOCKS ничего не гарантирует: плечо до VPS может быть мёртвым, а
-    в конфиге — незаменённый плейсхолдер вместо адреса. Без этой проверки
-    симптом всплывает в самом низу отчёта под видом проблемы с токеном.
+    Слушающий SOCKS ничего не гарантирует: плечо до VPS может быть мёртвым, а в
+    конфиге — незаменённый плейсхолдер вместо адреса.
     """
     if shutil.which("curl") is None:
         return "curl не найден, проверка пропущена"
@@ -325,12 +323,10 @@ async def _check_token_via_tunnel(token: str, direct_error: Exception) -> str:
 
     При блокировке Discord по IP прямой путь обязан падать: маркировка трафика
     привязана к cgroup bashmak.service, а doctor запускается из шелла, то есть
-    вне туннеля. Без этого фоллбэка проверка показывала бы FAIL даже при
-    полностью рабочем боте.
+    вне туннеля. Без фоллбэка проверка давала бы FAIL при рабочем боте.
 
-    Через curl, а не httpx, чтобы не тащить socksio в зависимости ради одной
-    диагностической проверки. Токен передаётся в stdin, а не в argv, иначе он
-    был бы виден в ps.
+    Через curl, а не httpx, чтобы не тащить socksio ради одной проверки. Токен
+    идёт в stdin, а не в argv: иначе он виден в ps.
     """
     kind = type(direct_error).__name__
     if shutil.which("curl") is None:
@@ -396,8 +392,7 @@ async def run(offline: bool) -> int:
     print("\n модели")
     report.check("VAD", lambda: _check_file(cfg.vad.path("model_path"), "silero"))
     report.check("LLM", lambda: _check_file(cfg.llm.path("model_path"), "gguf"))
-    # Путь к весам лежит в подсекции активного движка: у каждого он свой, и
-    # общего stt.model_path больше нет.
+    # Путь к весам лежит в подсекции активного движка, общего stt.model_path нет.
     stt_engine = str(cfg.stt.get("engine", "gigaam")).strip().lower()
     report.check(
         f"STT ({stt_engine})",
@@ -406,7 +401,7 @@ async def run(offline: bool) -> int:
     report.check("TTS", lambda: _check_file(cfg.tts.path("model_path"), "silero-tts"))
     report.check("llama-server", lambda: _check_llama_binary(cfg.root))
 
-    # Раньше проверок Discord: при упавшем туннеле дальше падает всё, и причина
+    # Выше проверок Discord: при упавшем туннеле дальше падает всё, и причина
     # видна здесь, а не в строке «DISCORD_TOKEN: timeout» внизу отчёта.
     print("\n туннель")
     if not _tunnel_configured():

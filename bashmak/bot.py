@@ -27,6 +27,7 @@ from discord.ext import voice_recv
 from .audio import voice_recv_patch
 from .audio.listener import VoiceListener
 from .config import Config, load_config
+from .game import GameLauncher
 from .intent.router import Decision, Intent, IntentRouter
 from .jokes import JokeTeller
 from .llm.client import LlmClient
@@ -78,8 +79,7 @@ class GuildSession:
         # Один источник на всё время в канале: микшер сам разруливает,
         # что сейчас звучит — музыка, речь или их смесь.
         self.voice_client.play(self.arbiter.source)
-        # listen() сам проставляет синку voice_client (AudioReader.__init__),
-        # так что готовить его заранее не нужно.
+        # listen() сам проставляет синку voice_client (AudioReader.__init__).
         self.voice_client.listen(self.listener.sink, after=self._on_listen_stop)
         self.listener.start()
         log.info(
@@ -90,8 +90,8 @@ class GuildSession:
 
     async def close(self) -> None:
         self.arbiter.interrupt()
-        # Заодно снимает всё, что ещё считается для этого канала: озвучивать
-        # это будет уже некому, а контекст закрытой сессии переживать не должен.
+        # Снимает и всё, что ещё считается для этого канала: озвучивать это
+        # будет некому, а контекст закрытую сессию переживать не должен.
         self.bot.llm_queue.drop(self.channel_id)
         self.player.shutdown()
         await self.listener.stop()
@@ -128,10 +128,10 @@ class GuildSession:
     def silence(self) -> None:
         """Команда молчания: замолчать и выключить музыку, ничего не отвечая.
 
-        Три источника звука гасятся по отдельности: то, что уже звучит
-        (арбитр), то, что ещё считается или стоит в очереди (очередь LLM), и
-        музыка. Ответ плеера («Выключил музыку») выбрасывается: команда
-        замолчать не должна заканчиваться репликой.
+        Три источника звука гасятся по отдельности: то, что уже звучит (арбитр),
+        то, что ещё считается или стоит в очереди (очередь LLM), и музыка. Ответ
+        плеера («Выключил музыку») выбрасывается — команда замолчать не должна
+        заканчиваться репликой.
         """
         self.arbiter.interrupt()
         self.bot.llm_queue.drop(self.channel_id)
@@ -182,12 +182,18 @@ class GuildSession:
             await self._handle_joke(decision)
             return
 
+        if decision.intent is Intent.GAME:
+            # Тоже мимо очереди: это поход по одной ссылке, а ответ на кодовую
+            # фразу заранее известен и модели не требует.
+            await self._handle_game(decision)
+            return
+
         if decision.intent is Intent.CHAT:
             await self.bot.llm_queue.submit(
                 ChatTask(
-                    # Момент конца фразы, а не текущее время: очередь
-                    # расставляет приоритет по нему, и время, потраченное на
-                    # STT и разбор намерения, не должно двигать человека в конец.
+                    # Момент конца фразы, а не текущее время: по нему очередь
+                    # расставляет приоритет, и время на STT и разбор намерения
+                    # не должно двигать человека в конец.
                     ended_at=transcript.ended_at,
                     channel_id=self.channel_id,
                     user_id=transcript.user_id,
@@ -208,6 +214,16 @@ class GuildSession:
         except Exception:
             log.exception("анекдот не рассказался")
             answer = "Анекдот сломался, посмотри логи."
+
+        turn_note(sent=f"команда {decision.intent.value}", reply=answer)
+        await self.say(answer)
+
+    async def _handle_game(self, decision: Decision) -> None:
+        try:
+            answer = await self.bot.game.launch()
+        except Exception:
+            log.exception("сценарий не запустился")
+            answer = "Сценарий не открылся, посмотри логи."
 
         turn_note(sent=f"команда {decision.intent.value}", reply=answer)
         await self.say(answer)
@@ -252,10 +268,10 @@ class BashmakBot(discord.Client):
         super().__init__(intents=intents)
         self.cfg = cfg
         self.tree = app_commands.CommandTree(self)
-        # Без этих двух «Ошибка взаимодействия» в Discord не оставляет в логе
-        # ничего: interaction_check показывает, что команда до нас дошла,
-        # on_error — что она упала (иначе исключение уходит в логгер
-        # discord.app_commands, а он у нас прижат вместе со всем discord.*).
+        # Без этих двух «Ошибка взаимодействия» не оставляет в логе ничего:
+        # interaction_check показывает, что команда дошла, on_error — что она
+        # упала (иначе исключение уходит в логгер discord.app_commands, а он
+        # прижат вместе со всем discord.*).
         self.tree.interaction_check = self._log_command
         self.tree.on_error = self._on_command_error
 
@@ -265,9 +281,11 @@ class BashmakBot(discord.Client):
         self.wakeword = WakeWordFilter(cfg.wakeword)
         self.router = IntentRouter(cfg, self.llm)
         self.llm_queue = LlmQueue(cfg.llm, self.llm, self._on_llm_reply)
-        # Один на весь бот: пачка из ленты и список рассказанного общие для
-        # всех каналов, иначе в соседнем звучал бы тот же анекдот.
+        # Один на весь бот: пачка и список рассказанного общие для всех каналов.
         self.jokes = JokeTeller(cfg, self.llm)
+        # Тоже один: ручка запуска игры общая, держать под неё по клиенту на
+        # канал незачем.
+        self.game = GameLauncher(cfg)
 
         self.sessions: dict[int, GuildSession] = {}
         self._idle_task: asyncio.Task | None = None
@@ -296,11 +314,8 @@ class BashmakBot(discord.Client):
 
     # ------------------------------------------------------- жизненный цикл
     async def setup_hook(self) -> None:
-        """Зарегистрировать slash-команды.
-
-        py-cord синхронизировал дерево команд сам, discord.py — нет: без
-        явного ``sync()`` команд в Discord просто не появится.
-        """
+        """Зарегистрировать slash-команды: без явного ``sync()`` discord.py
+        ничего в Discord не публикует."""
         guild_ids = [int(g) for g in (self.cfg.discord.get("guild_ids") or [])]
         if not guild_ids:
             await self.tree.sync()
@@ -355,6 +370,7 @@ class BashmakBot(discord.Client):
 
         await self.llm_queue.stop()
         await self.jokes.close()
+        await self.game.close()
         await self.llm.close()
         self.stt.close()
         self.tts.close()
@@ -381,8 +397,7 @@ class BashmakBot(discord.Client):
         """Выкладывать уровни говорящих для монитора (bashmak/monitor.py).
 
         Отдельной задачей, а не из слушателя: в аудиотракте, который крутится
-        каждые 30 мс, файловый ввод-вывод недопустим. Здесь он раз в полсекунды
-        и мимо обработки речи.
+        каждые 30 мс, файловый ввод-вывод недопустим.
         """
         path = levels_path(self.cfg)
         empty_published = False
@@ -409,8 +424,8 @@ class BashmakBot(discord.Client):
             await asyncio.sleep(IDLE_CHECK_INTERVAL)
             if timeout <= 0:
                 continue
-            # Тело цикла целиком под try: любая ошибка (например, канал отвалился
-            # и стал None) не должна убивать сторожа до конца жизни процесса.
+            # Тело цикла под try: любая ошибка (например, канал отвалился и стал
+            # None) не должна убивать сторожа до конца жизни процесса.
             try:
                 await self._drop_empty_sessions(timeout)
             except Exception:
@@ -443,6 +458,28 @@ async def _reject_dm(interaction: discord.Interaction) -> bool:
     return False
 
 
+async def _open_session(bot: BashmakBot, channel) -> GuildSession:  # noqa: ANN001 — VoiceChannel|StageChannel
+    """Зайти в канал, поднять сессию и записать её боту.
+
+    При неудаче гасит наполовину поднятое соединение: без этого бот молча висел
+    бы в канале без сессии, и /leave о таком «призраке» не знает. Наружу ошибка
+    уходит как есть — что сказать человеку, решает команда.
+    """
+    voice_client: voice_recv.VoiceRecvClient | None = None
+    try:
+        voice_client = await channel.connect(cls=voice_recv.VoiceRecvClient)
+        session = GuildSession(bot, voice_client)
+        await session.start()
+    except Exception:
+        if voice_client is not None:
+            with contextlib.suppress(Exception):
+                await voice_client.disconnect(force=True)
+        raise
+
+    bot.sessions[channel.guild.id] = session
+    return session
+
+
 def build_bot(cfg: Config) -> BashmakBot:
     bot = BashmakBot(cfg)
 
@@ -457,34 +494,66 @@ def build_bot(cfg: Config) -> BashmakBot:
             return
 
         # Строго до закрытия старой сессии и подключения: и то и другое дольше
-        # трёх секунд, которые Discord даёт на ответ, а просроченный ответ —
-        # это «Ошибка взаимодействия» у пользователя и NotFound у нас.
-        # После defer() отвечать можно только через followup.
+        # трёх секунд, которые Discord даёт на ответ. После defer() отвечать
+        # можно только через followup.
         await interaction.response.defer(ephemeral=True)
 
         existing = bot.sessions.pop(interaction.guild.id, None)
         if existing is not None:
             await existing.close()
-        voice_client: voice_recv.VoiceRecvClient | None = None
         try:
-            voice_client = await voice.channel.connect(cls=voice_recv.VoiceRecvClient)
-            session = GuildSession(bot, voice_client)
-            await session.start()
-            bot.sessions[interaction.guild.id] = session
+            await _open_session(bot, voice.channel)
         except Exception:
             log.exception("не смог зайти в голосовой канал")
-            # Соединение могло уже подняться — без этого бот молча висел бы в
-            # канале без сессии, и выгнать его было бы нечем: /leave не знает
-            # о таком «призраке».
-            if voice_client is not None:
-                with contextlib.suppress(Exception):
-                    await voice_client.disconnect(force=True)
             await interaction.followup.send("Не получилось подключиться — посмотри логи.", ephemeral=True)
             return
 
         await interaction.followup.send(
             f"Слушаю в #{voice.channel.name}. Зови по имени: «Башмак, ...»", ephemeral=True
         )
+
+    @bot.tree.command(name="play", description="Включить трек по ссылке на YouTube или по названию")
+    @app_commands.describe(query="Ссылка на YouTube или название трека")
+    async def play(interaction: discord.Interaction, query: str) -> None:
+        if await _reject_dm(interaction):
+            return
+
+        query = query.strip()
+        if not query:
+            await interaction.response.send_message(
+                "А что включать? Кинь ссылку или назови трек.", ephemeral=True
+            )
+            return
+
+        session = bot.sessions.get(interaction.guild.id)
+        # Бота могли ещё не звать: /play заводит сессию сам, чтобы ради одной
+        # ссылки не требовать сначала /start.
+        channel = None if session is not None else getattr(interaction.user.voice, "channel", None)
+        if session is None and channel is None:
+            await interaction.response.send_message(
+                "Меня нет в канале, а тебя там не видно. Зайди в голосовой и повтори.",
+                ephemeral=True,
+            )
+            return
+
+        # Поиск ходит в сеть и в три секунды, которые Discord даёт на ответ, не
+        # укладывается. Ответ не ephemeral: что заиграло, касается всех в
+        # канале, а не только того, кто попросил.
+        await interaction.response.defer()
+
+        if channel is not None:
+            try:
+                session = await _open_session(bot, channel)
+            except Exception:
+                log.exception("не смог зайти в голосовой канал по /play")
+                await interaction.followup.send("Не получилось подключиться — посмотри логи.")
+                return
+
+        # Тот же путь, что и у голосовой команды: ссылку yt-dlp играет как есть,
+        # строку ищет на YouTube. Вслух ответ не проговаривается — попросили
+        # текстом, отвечаем текстом.
+        answer = await session.player.play(query, interaction.user.display_name)
+        await interaction.followup.send(answer)
 
     @bot.tree.command(name="leave", description="Выгнать Башмака из голосового канала")
     async def leave(interaction: discord.Interaction) -> None:
@@ -540,9 +609,9 @@ def main() -> None:
 
     bot = build_bot(cfg)
     try:
-        # log_handler=None — иначе run() настраивает логирование сам: вешает
-        # свой хендлер (каждая строка библиотеки печатается дважды) и ставит
-        # логгеру discord уровень INFO уже ПОСЛЕ нашего setup_logging().
+        # log_handler=None — иначе run() вешает свой хендлер (каждая строка
+        # библиотеки печатается дважды) и поднимает логгер discord до INFO уже
+        # ПОСЛЕ нашего setup_logging().
         bot.run(cfg.discord_token, log_handler=None)
     except KeyboardInterrupt:  # pragma: no cover
         log.info("прервано с клавиатуры")
