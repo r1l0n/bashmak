@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import httpx
 
@@ -22,8 +23,14 @@ log = logging.getLogger(__name__)
 #: Что бот говорит, когда сценарий поднялся.
 _DEFAULT_REPLY = "Иван Михайлович написал парочку за время вашего отсутствия"
 
-#: Ручка отвечает обычно сразу, но на холодном старте машина может думать.
-_DEFAULT_TIMEOUT = 15.0
+#: Сколько ждать ответа. Ручка отвечать не обязана — она поднимает игру и
+#: молчит, — а молчание в ответ считается успехом (см. launch). То есть это не
+#: срок ожидания, а длина паузы, в которую бот молчит в канале: запрос
+#: доставляется на соединении, задолго до её конца.
+#:
+#: Совсем убрать паузу нельзя: за неё успевает прийти отказ в соединении, и
+#: выключенная машина отличается от запущенной игры именно так.
+_DEFAULT_TIMEOUT = 3.0
 
 #: Переменная окружения со ссылкой — перекрывает конфиг (см. .env.example).
 ENV_URL = "BASHMAK_GAME_URL"
@@ -60,19 +67,35 @@ class GameLauncher:
             log.warning("ссылка на запуск не настроена (game.url или %s)", ENV_URL)
             return "Не могу: сценарии лежат не у меня. Пропиши ссылку в конфиге."
 
+        started = time.monotonic()
         try:
             response = await self._http().get(self._url)
             response.raise_for_status()
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+            # Запрос ушёл и был принят — не дождались только ответа. Для этой
+            # ручки штатно: она сначала поднимает игру, а отвечает уже потом,
+            # если вообще отвечает. Игра при этом запускается, поэтому отвечаем
+            # как при успехе, а странность остаётся в логе.
+            #
+            # Отличается от ветки ниже принципиально: там соединение не
+            # состоялось, то есть до машины с игрой не дошло ничего.
+            log.warning(
+                "ручка запуска приняла запрос, но не ответила за %.1f с (%s) — "
+                "считаю, что игра поднялась",
+                time.monotonic() - started,
+                type(exc).__name__,
+            )
+            return self._reply
         except httpx.HTTPStatusError as exc:
             # Отдельно от прочих: у HTTPStatusError в тексте вся ссылка
             # целиком — вместе с токеном, а лог пишется в файл.
             log.warning("ручка запуска ответила %s", exc.response.status_code)
             return "Сценарий не открылся, посмотри логи."
         except Exception as exc:
-            log.warning("ручка запуска не ответила (%s: %s)", type(exc).__name__, exc)
+            log.warning("до ручки запуска не достучался (%s: %s)", type(exc).__name__, exc)
             return "Сценарий не открылся, посмотри логи."
 
-        log.info("сценарий запущен (ответ %s)", response.status_code)
+        log.info("сценарий запущен (ответ %s за %.1f с)", response.status_code, time.monotonic() - started)
         return self._reply
 
     async def close(self) -> None:

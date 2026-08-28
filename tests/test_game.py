@@ -129,6 +129,34 @@ def test_network_error_does_not_escape(loop, monkeypatch):
     assert "Иван Михайлович" not in answer
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("ответа нет"),
+        httpx.ReadError("соединение закрыто"),
+        httpx.RemoteProtocolError("сервер оборвал ответ"),
+    ],
+)
+def test_silence_in_response_counts_as_a_launch(loop, monkeypatch, error):
+    """Ручка сначала поднимает игру и только потом отвечает — а то и не отвечает.
+
+    Соединение состоялось, запрос доставлен, игра встала. Ругаться при
+    работающей игре — ровно то, за что это правило и добавлено.
+    """
+    launcher, _ = build(monkeypatch, url=URL, client=FakeClient(error=error))
+
+    assert loop.run_until_complete(launcher.launch()) == launcher._reply
+
+
+def test_a_connection_that_never_happened_is_a_failure(loop, monkeypatch):
+    """ConnectTimeout — соседняя ошибка по имени, но не по смыслу: не дошло ничего."""
+    launcher, _ = build(
+        monkeypatch, url=URL, client=FakeClient(error=httpx.ConnectTimeout("не достучался"))
+    )
+
+    assert "Иван Михайлович" not in loop.run_until_complete(launcher.launch())
+
+
 def test_http_error_does_not_escape(loop, monkeypatch):
     launcher, _ = build(
         monkeypatch, url=URL, client=FakeClient(response=FakeResponse(500, status_error(500)))
